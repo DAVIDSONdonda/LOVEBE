@@ -17,6 +17,7 @@ import { WebView } from 'react-native-webview';
 import CookieManager from '@react-native-cookies/cookies';
 
 const COOKIE_KEY = 'pasted_browser_cookie_text_v1';
+const DELAY_KEY = 'watch_delay_seconds_v1';
 const SITES = {
   youtube: { label: 'YouTube', url: 'https://www.youtube.com/' },
   aviso: { label: 'Aviso', url: 'https://aviso.bz/tasks-youtube' },
@@ -168,67 +169,6 @@ const avisoTaskCounterScript = `
 true;
 `;
 
-const avisoTaskAssistantScript = `
-(function() {
-  if (window.__avisoAssistantInstalled) {
-    window.__avisoAssistantStart && window.__avisoAssistantStart();
-    true;
-  } else {
-    window.__avisoAssistantInstalled = true;
-    window.__avisoAssistantRunning = false;
-    function visible(el) {
-      if (!el) return false;
-      var s = getComputedStyle(el);
-      return el.offsetParent !== null && s.display !== 'none' && s.visibility !== 'hidden';
-    }
-    function taskTime(el) {
-      var id = (el.id || '').replace('link_ads_start_', '');
-      var input = document.getElementById('ads_timer_' + id);
-      var value = input && parseInt(input.value, 10);
-      if (value > 0) return value;
-      var onclick = el.getAttribute('onclick') || '';
-      var match = onclick.match(/, ['\"](\\d+)['\"]/);
-      if (match) return parseInt(match[1], 10);
-      var row = el.closest('tr');
-      var text = row ? row.innerText : el.innerText;
-      var seconds = (text || '').match(/(\\d+)\\s*(?:сек|sec|s)/i);
-      return seconds ? parseInt(seconds[1], 10) : 999;
-    }
-    function send(message) {
-      window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify(message));
-    }
-    window.__avisoAssistantStart = function() {
-      var nodes = Array.from(document.querySelectorAll('span[id^="link_ads_start_"]')).filter(visible);
-      if (!nodes.length) {
-        send({ type: 'avisoAssistant', status: 'empty', message: 'Aucune tâche disponible.' });
-        return;
-      }
-      nodes.sort(function(a, b) { return taskTime(a) - taskTime(b); });
-      var task = nodes[0];
-      var id = task.id.replace('link_ads_start_', '');
-      var seconds = taskTime(task);
-      document.querySelectorAll('[data-aviso-assistant="selected"]').forEach(function(el) {
-        el.style.outline = '';
-        el.removeAttribute('data-aviso-assistant');
-      });
-      task.setAttribute('data-aviso-assistant', 'selected');
-      task.style.outline = '3px solid #64d2ff';
-      task.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      send({ type: 'avisoAssistant', status: 'ready', id: id, seconds: seconds, total: nodes.length });
-      window.__avisoAssistantRunning = true;
-    };
-    window.__avisoAssistantPoll = setInterval(function() {
-      if (!window.__avisoAssistantRunning) return;
-      var confirm = Array.from(document.querySelectorAll('span[id^="ads_btn_confirm_"]')).find(visible);
-      if (confirm) send({ type: 'avisoAssistant', status: 'confirm', id: confirm.id.replace('ads_btn_confirm_', '') });
-    }, 1500);
-    window.__avisoAssistantStart();
-    true;
-  }
-})();
-true;
-`;
-
 const avisoOpenHookScript = `
 (function() {
   if (window.__avisoOpenHooked) return true;
@@ -369,7 +309,6 @@ const avisoAutoClickScript = `
 true;
 `;
 
-// Watcher des récompenses sur Aviso (injecté dans le pane Aviso)
 const rewardWatcherScript = `
 (function() {
   if (window.__rewardWatcherInstalled) return true;
@@ -415,7 +354,185 @@ const rewardWatcherScript = `
 true;
 `;
 
-// Watcher de navigation du pane bas
+const startWatchingClickerScript = `
+(function() {
+  if (window.__startWatchingClickerInstalled) return true;
+  window.__startWatchingClickerInstalled = true;
+
+  function send(message) {
+    window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify(message));
+  }
+
+  function findStartButton() {
+    var el = document.getElementById('youtube_views-channel-link');
+    if (el && el.offsetParent !== null) return el;
+
+    var alt = document.querySelector('a.youtube_views-channel-button');
+    if (alt && alt.offsetParent !== null) return alt;
+
+    var candidates = document.querySelectorAll('a, button, span[role="button"], div[role="button"]');
+    for (var i = 0; i < candidates.length; i++) {
+      var btn = candidates[i];
+      if (btn.offsetParent === null) continue;
+      var text = (btn.innerText || btn.textContent || '').trim().toLowerCase();
+      if (text.indexOf('начать просмотр') !== -1 ||
+          text.indexOf('start watching') !== -1 ||
+          text.indexOf('start viewing') !== -1 ||
+          text.indexOf('продолжить') !== -1 ||
+          text.indexOf('continue') !== -1) {
+        return btn;
+      }
+    }
+    return null;
+  }
+
+  function dispatchFullClick(el) {
+    try {
+      var rect = el.getBoundingClientRect();
+      var x = rect.left + rect.width / 2;
+      var y = rect.top + rect.height / 2;
+
+      el.dispatchEvent(new MouseEvent('mouseover', {
+        bubbles: true, cancelable: true, clientX: x, clientY: y
+      }));
+      el.dispatchEvent(new MouseEvent('mousemove', {
+        bubbles: true, cancelable: true, clientX: x, clientY: y
+      }));
+      el.dispatchEvent(new MouseEvent('mousedown', {
+        bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0
+      }));
+      el.dispatchEvent(new MouseEvent('mouseup', {
+        bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0
+      }));
+      el.click();
+
+      if (typeof PointerEvent !== 'undefined') {
+        el.dispatchEvent(new PointerEvent('pointerdown', {
+          bubbles: true, cancelable: true, clientX: x, clientY: y,
+          pointerId: 1, button: 0, buttons: 1, isPrimary: true, pointerType: 'mouse'
+        }));
+        el.dispatchEvent(new PointerEvent('pointerup', {
+          bubbles: true, cancelable: true, clientX: x, clientY: y,
+          pointerId: 1, button: 0, buttons: 0, isPrimary: true, pointerType: 'mouse'
+        }));
+      }
+      return true;
+    } catch(e) { return false; }
+  }
+
+  var lastClickTime = 0;
+  var lastHref = '';
+
+  setInterval(function() {
+    try {
+      var btn = findStartButton();
+      if (!btn) return;
+
+      var now = Date.now();
+      var href = btn.getAttribute('href') || '';
+      if (now - lastClickTime < 3000 && href === lastHref) return;
+
+      lastClickTime = now;
+      lastHref = href;
+
+      var clicked = dispatchFullClick(btn);
+      if (clicked) {
+        send({
+          type: 'startWatchingClicked',
+          text: (btn.innerText || '').substring(0, 40),
+          href: href.substring(0, 100)
+        });
+      }
+    } catch(e) {}
+  }, 1000);
+
+  true;
+})();
+true;
+`;
+
+const adSkipperScript = `
+(function() {
+  if (window.__adSkipperInstalled) return true;
+  window.__adSkipperInstalled = true;
+
+  var adsSkipped = 0;
+  var lastSkipAttempt = 0;
+
+  function send(message) {
+    window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify(message));
+  }
+
+  function skipAds() {
+    var now = Date.now();
+    var skipSelectors = [
+      '.ytp-ad-skip-button',
+      '.ytp-ad-skip-button-modern',
+      '.ytp-skip-ad-button',
+      '.ytp-ad-skip-button-text',
+      'button[aria-label*="Skip"]',
+      'button[aria-label*="Ignorer"]',
+      'button[aria-label*="Passer"]',
+      '.ytp-ad-skip-button-container',
+      '.ytp-skip-ad'
+    ];
+
+    var skipped = false;
+    for (var i = 0; i < skipSelectors.length; i++) {
+      try {
+        var buttons = document.querySelectorAll(skipSelectors[i]);
+        for (var j = 0; j < buttons.length; j++) {
+          var btn = buttons[j];
+          if (btn && btn.offsetParent !== null && !btn.disabled) {
+            var rect = btn.getBoundingClientRect();
+            if (rect.width > 0 && rect.height > 0) {
+              btn.click();
+              adsSkipped++;
+              skipped = true;
+              lastSkipAttempt = now;
+              if (adsSkipped === 1) {
+                send({ type: 'adSkipped', count: adsSkipped });
+              }
+              break;
+            }
+          }
+        }
+        if (skipped) break;
+      } catch(e) {}
+    }
+
+    if (!skipped && now - lastSkipAttempt > 2000) {
+      var allButtons = document.querySelectorAll('button, .ytp-ad-skip-button, [role="button"]');
+      for (var k = 0; k < allButtons.length; k++) {
+        var b = allButtons[k];
+        if (b && b.offsetParent !== null) {
+          var text = b.innerText || b.textContent || '';
+          var ariaLabel = b.getAttribute('aria-label') || '';
+          if (text.indexOf('Ignorer') !== -1 ||
+              text.indexOf('Skip') !== -1 ||
+              text.indexOf('Passer') !== -1 ||
+              ariaLabel.indexOf('Skip') !== -1 ||
+              ariaLabel.indexOf('Ignorer') !== -1 ||
+              ariaLabel.indexOf('Passer') !== -1) {
+            b.click();
+            adsSkipped++;
+            skipped = true;
+            lastSkipAttempt = now;
+            break;
+          }
+        }
+      }
+    }
+
+    return skipped;
+  }
+
+  setInterval(skipAds, 500);
+  true;
+})();
+true;
+`;
+
 const youtubeWatcherScript = `
 (function() {
   if (window.__ytWatcherInstalled) return true;
@@ -429,7 +546,6 @@ const youtubeWatcherScript = `
 true;
 `;
 
-// Monitoring vidéo dans le pane bas (timer + pubs)
 const videoMonitorScript = `
 (function() {
   if (window.__videoMonitorInstalled) return true;
@@ -488,19 +604,31 @@ export default function App() {
   const [currentTaskTime, setCurrentTaskTime] = useState(0);
   const [currentTaskId, setCurrentTaskId] = useState(null);
   const [videoProgress, setVideoProgress] = useState({ current: 0, duration: 0, isAd: false });
-  const [watchDelay] = useState(10); // secondes après visionnage (fixe pour prototype)
+  const [watchDelay, setWatchDelay] = useState(3); // 3s par défaut
   const [videoWatchedEnough, setVideoWatchedEnough] = useState(false);
   const [successCount, setSuccessCount] = useState(0);
 
   const avisoWebview = useRef(null);
   const bottomWebview = useRef(null);
 
+  // ==========================================================================
+  // CHARGEMENT INITIAL (cookies + délai)
+  // ==========================================================================
   useEffect(() => {
-    SecureStore.getItemAsync(COOKIE_KEY).then((value) => {
-      if (value) {
-        setCookieText(value);
-        setSavedCookieText(value);
+    Promise.all([
+      SecureStore.getItemAsync(COOKIE_KEY),
+      SecureStore.getItemAsync(DELAY_KEY),
+    ]).then(([cookieValue, delayValue]) => {
+      if (cookieValue) {
+        setCookieText(cookieValue);
+        setSavedCookieText(cookieValue);
         setSaved(true);
+      }
+      if (delayValue) {
+        const num = parseInt(delayValue, 10);
+        if (!isNaN(num) && num >= 0) {
+          setWatchDelay(num);
+        }
       }
       setLoading(false);
     });
@@ -509,14 +637,44 @@ export default function App() {
   const parsedCount = useMemo(() => cookiePairs(cookieText).length, [cookieText]);
 
   // ==========================================================================
-  // WATCHDOG vidéo : reset si pub détectée
+  // SAUVEGARDE DÉLAI
   // ==========================================================================
-  useEffect(() => {
-    if (videoProgress.isAd && currentTaskTime > 0) {
-      // La pub "remet à zéro" le compteur de visionnage (comme dans Electron)
-      setAssistantStatus(`⏭️ Publicité en cours · le compteur reprendra après`);
+  const updateWatchDelay = (value) => {
+    const num = parseInt(value, 10);
+    if (!isNaN(num) && num >= 0) {
+      setWatchDelay(num);
+      SecureStore.setItemAsync(DELAY_KEY, String(num));
     }
-  }, [videoProgress.isAd, currentTaskTime]);
+  };
+
+  // ==========================================================================
+  // RECHERCHE TÂCHE SUIVANTE (boucle)
+  // ==========================================================================
+  const runNextTask = () => {
+    if (automationPaused) {
+      setAssistantStatus('⏸️ Automatisation en pause');
+      return;
+    }
+    setAssistantStatus('🔄 Recherche de la tâche suivante…');
+
+    avisoWebview.current?.injectJavaScript(`
+      (function() {
+        ${avisoOpenHookScript}
+        ${avisoAutoClickScript}
+        ${rewardWatcherScript}
+        if (window.__avisoAutoClick) {
+          window.__avisoAutoClick();
+        } else {
+          window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify({
+            type: 'autoClickResult',
+            status: 'error',
+            message: 'Script auto-click non disponible'
+          }));
+        }
+      })();
+      true;
+    `);
+  };
 
   // ==========================================================================
   // HANDLE VIDEO WATCHED ENOUGH
@@ -528,6 +686,7 @@ export default function App() {
 
     setTimeout(() => {
       setAssistantStatus(`Demande de validation de la récompense…`);
+
       avisoWebview.current?.injectJavaScript(`
         (function() {
           try {
@@ -565,23 +724,10 @@ export default function App() {
     try {
       const message = JSON.parse(event.nativeEvent.data);
 
-      // ---- Aviso : compteur de tâches ----
       if (message.type === 'avisoTaskCount') {
         setAvisoTaskCount(Number(message.count) || 0);
       }
 
-      // ---- Aviso : assistant manuel ----
-      if (message.type === 'avisoAssistant') {
-        if (message.status === 'ready') {
-          setAssistantStatus(`Tâche ${message.id} prête · ${message.seconds >= 999 ? 'durée inconnue' : `${message.seconds}s`} · ${message.total} disponible(s)`);
-        } else if (message.status === 'confirm') {
-          setAssistantStatus(`Tâche ${message.id} prête à être validée dans Aviso`);
-        } else if (message.status === 'empty') {
-          setAssistantStatus(message.message);
-        }
-      }
-
-      // ---- Aviso : clic auto ----
       if (message.type === 'autoClickResult') {
         if (message.status === 'clicked') {
           setLastClickedTask({ id: message.id, time: message.time });
@@ -591,13 +737,18 @@ export default function App() {
           setVideoProgress({ current: 0, duration: 0, isAd: false });
           setAssistantStatus(`Tâche ${message.id} cliquée (${message.time}s) · attente de la redirection…`);
         } else if (message.status === 'empty') {
-          setAssistantStatus('Aucune tâche disponible');
+          // Aucune tâche → attendre et réessayer
+          setAssistantStatus('⏳ Aucune tâche · nouvel essai dans 10s…');
+          if (!automationPaused) {
+            setTimeout(() => {
+              if (!automationPaused) runNextTask();
+            }, 10000);
+          }
         } else if (message.status === 'error') {
           setAssistantStatus(`Erreur clic : ${message.message}`);
         }
       }
 
-      // ---- Aviso : capture de redirection ----
       if (message.type === 'redirectCaptured') {
         console.log('[AUTO] Redirect capturé:', message.source, message.url);
         const absolute = message.url.startsWith('http')
@@ -608,7 +759,6 @@ export default function App() {
         setAssistantStatus(`Chargement pane bas : ${absolute.substring(0, 80)}…`);
       }
 
-      // ---- Pane bas : navigation ----
       if (message.type === 'bottomNav') {
         console.log('[BOTTOM] Navigation:', message.url);
         const u = message.url || '';
@@ -618,13 +768,11 @@ export default function App() {
           setAssistantStatus(`YouTube chargé · ${vid}`);
         } else if (u.includes('aviso.bz')) {
           setBottomTitle(`AVISO /go — ${u.substring(0, 60)}…`);
-          setAssistantStatus(`Page intermédiaire Aviso`);
         } else {
           setBottomTitle(`PAGE — ${u.substring(0, 60)}…`);
         }
       }
 
-      // ---- Pane bas : progression vidéo ----
       if (message.type === 'videoProgress') {
         if (!message.found) {
           setVideoProgress({ current: 0, duration: 0, isAd: false });
@@ -637,10 +785,8 @@ export default function App() {
           isAd: message.isAd
         });
 
-        // Si pub → on ne compte pas
         if (message.isAd) return;
 
-        // Vérifie si assez regardé
         if (currentTaskTime > 0 && !videoWatchedEnough) {
           const effective = (message.duration > 0 && message.duration < currentTaskTime)
             ? message.duration
@@ -659,10 +805,18 @@ export default function App() {
         }
       }
 
-      // ---- Aviso : récompense disponible ----
+      if (message.type === 'startWatchingClicked') {
+        console.log('[AUTO] Start Watching cliqué:', message.text);
+        setAssistantStatus(`▶️ "${message.text}" cliqué · chargement…`);
+      }
+
+      if (message.type === 'adSkipped') {
+        console.log('[AUTO] Pub skippée:', message.count);
+        setAssistantStatus(`⏭️ Publicité ignorée (${message.count})`);
+      }
+
       if (message.type === 'rewardAvailable') {
         console.log('[AUTO] Reward disponible:', message.id);
-        // Clic auto si on a déjà fini le visionnage
         if (videoWatchedEnough) {
           avisoWebview.current?.injectJavaScript(`
             var btn = document.getElementById('ads_btn_confirm_${message.id}');
@@ -675,30 +829,33 @@ export default function App() {
             }
             true;
           `);
-        } else {
-          setAssistantStatus(`Bouton de validation détecté · visionnage en cours…`);
         }
       }
 
-      // ---- Récompense cliquée ----
       if (message.type === 'rewardClicked') {
-        setAssistantStatus(`Récompense validée pour la tâche ${message.id} · vérification…`);
+        setAssistantStatus(`Récompense validée · vérification…`);
       }
 
-      // ---- Récompense confirmée ----
       if (message.type === 'rewardSuccess') {
         const newCount = successCount + 1;
         setSuccessCount(newCount);
         setAssistantStatus(`✅ Récompense confirmée ! Total : ${newCount}`);
+
         setCurrentTaskTime(0);
         setCurrentTaskId(null);
         setVideoWatchedEnough(false);
         setVideoProgress({ current: 0, duration: 0, isAd: false });
+
+        // ⚡ Lancer la tâche suivante
+        if (!automationPaused) {
+          setTimeout(() => {
+            if (!automationPaused) runNextTask();
+          }, 2000 + Math.random() * 2000);
+        }
       }
 
-      // ---- Récompense non trouvée ----
       if (message.type === 'rewardNotFound') {
-        setAssistantStatus(`⚠️ Bouton de validation non trouvé · réessai dans 5s…`);
+        setAssistantStatus(`⚠️ Bouton validation non trouvé · réessai dans 5s…`);
         setTimeout(() => {
           if (currentTaskId) {
             avisoWebview.current?.injectJavaScript(`
@@ -709,16 +866,32 @@ export default function App() {
               true;
             `);
           }
+          // Après 5s de plus, on force le passage à la suivante
+          setTimeout(() => {
+            if (!automationPaused && currentTaskId) {
+              setAssistantStatus('⚠️ Validation impossible · passage à la suivante');
+              setCurrentTaskTime(0);
+              setCurrentTaskId(null);
+              setVideoWatchedEnough(false);
+              setVideoProgress({ current: 0, duration: 0, isAd: false });
+              runNextTask();
+            }
+          }, 5000);
         }, 5000);
       }
 
-      // ---- Tâche introuvable ----
       if (message.type === 'taskNotFound') {
-        setAssistantStatus(`❌ Tâche ${currentTaskId} introuvable · passage à la suivante`);
+        setAssistantStatus(`❌ Tâche introuvable · passage à la suivante`);
         setCurrentTaskTime(0);
         setCurrentTaskId(null);
         setVideoWatchedEnough(false);
         setVideoProgress({ current: 0, duration: 0, isAd: false });
+
+        if (!automationPaused) {
+          setTimeout(() => {
+            if (!automationPaused) runNextTask();
+          }, 2000 + Math.random() * 2000);
+        }
       }
     } catch (err) {
       console.log('[AUTO] Erreur handler message:', err.message);
@@ -730,13 +903,23 @@ export default function App() {
   // ==========================================================================
   const runAutoClick = () => {
     if (currentTaskTime > 0 && !videoWatchedEnough) {
-      Alert.alert('Tâche en cours', 'Une vidéo est déjà en cours de visionnage. Attendez la fin.');
+      Alert.alert('Tâche en cours', 'Une vidéo est déjà en cours. Attendez la fin.');
       return;
     }
     setAutomationPaused(false);
-    setAssistantStatus('Recherche de la tâche la plus courte…');
-    const script = `${avisoOpenHookScript}\n${avisoAutoClickScript}\nwindow.__avisoAutoClick();true;`;
-    avisoWebview.current?.injectJavaScript(script);
+    setAssistantStatus('🚀 Démarrage de la boucle automatique…');
+    runNextTask();
+  };
+
+  const togglePause = () => {
+    if (automationPaused) {
+      setAutomationPaused(false);
+      setAssistantStatus('▶️ Reprise de la boucle…');
+      runNextTask();
+    } else {
+      setAutomationPaused(true);
+      setAssistantStatus('⏸️ Boucle en pause');
+    }
   };
 
   const resetBottom = () => {
@@ -748,6 +931,56 @@ export default function App() {
     setCurrentTaskId(null);
     setVideoWatchedEnough(false);
     setVideoProgress({ current: 0, duration: 0, isAd: false });
+  };
+
+  // ==========================================================================
+  // FONCTIONS ACCUEIL
+  // ==========================================================================
+  const saveCookies = async () => {
+    if (!cookieText.trim()) {
+      Alert.alert('Cookies manquants', 'Collez d’abord le texte des cookies.');
+      return;
+    }
+    if (!parsedCount) {
+      Alert.alert('Format non reconnu', 'Utilisez par exemple : nom=valeur; autre=valeur, ou un tableau JSON de cookies.');
+      return;
+    }
+    await SecureStore.setItemAsync(COOKIE_KEY, cookieText);
+    setSavedCookieText(cookieText);
+    setSaved(true);
+    Alert.alert('Cookies enregistrés', `${parsedCount} cookie(s) seront utilisés.`);
+  };
+
+  const openSite = async () => {
+    const stored = await SecureStore.getItemAsync(COOKIE_KEY);
+    if (stored) {
+      setCookieText(stored);
+      setSavedCookieText(stored);
+      setSaved(true);
+    } else {
+      Alert.alert('Cookies non enregistrés', 'Enregistrez d’abord les cookies pour les utiliser sur Aviso.');
+      return;
+    }
+    let restored = false;
+    try {
+      restored = await restoreNativeCookies(stored, SITES.aviso.url);
+    } catch (_) {
+      restored = false;
+    }
+    if (!restored && cookiePairs(stored).length === 0) {
+      Alert.alert('Cookies non reconnus', 'Collez le fichier JSON complet exporté par Electron.');
+      return;
+    }
+    setAvisoTaskCount(null);
+    setAutomationPaused(true);
+    setBottomUrl(SITES.youtube.url);
+    setBottomTitle('YOUTUBE — accueil');
+    setLastClickedTask(null);
+    setCurrentTaskTime(0);
+    setCurrentTaskId(null);
+    setVideoWatchedEnough(false);
+    setVideoProgress({ current: 0, duration: 0, isAd: false });
+    setSplitMode(true);
   };
 
   // ==========================================================================
@@ -769,10 +1002,16 @@ export default function App() {
             <Text style={styles.webTitle}>Aviso + Bas</Text>
             <Text style={styles.taskBadge}>
               {avisoTaskCount === null ? 'Tâches : …' : `${avisoTaskCount} tâche${avisoTaskCount === 1 ? '' : 's'}`}
+              {successCount > 0 && ` · ✅ ${successCount}`}
             </Text>
           </View>
-          <Pressable onPress={runAutoClick} style={styles.reloadButton}>
-            <Text style={styles.reloadText}>▶ Auto</Text>
+          <Pressable
+            onPress={automationPaused ? runAutoClick : togglePause}
+            style={[styles.reloadButton, !automationPaused && styles.pauseButton]}
+          >
+            <Text style={styles.reloadText}>
+              {automationPaused ? '▶ Auto' : '⏸ Pause'}
+            </Text>
           </Pressable>
         </View>
 
@@ -791,11 +1030,11 @@ export default function App() {
             thirdPartyCookiesEnabled
             setSupportMultipleWindows={false}
             injectedJavaScriptBeforeContentLoaded={`${cookieScript(savedCookieText, SITES.aviso.url)}\n${avisoOpenHookScript}`}
-            injectedJavaScript={`${avisoTaskCounterScript}\n${avisoTaskAssistantScript}\n${avisoOpenHookScript}\n${avisoAutoClickScript}\n${rewardWatcherScript}`}
+            injectedJavaScript={`${avisoTaskCounterScript}\n${avisoOpenHookScript}\n${avisoAutoClickScript}\n${rewardWatcherScript}\n${startWatchingClickerScript}`}
             onMessage={handleWebMessage}
             onLoadEnd={() => {
               avisoWebview.current?.injectJavaScript(
-                `${avisoTaskCounterScript}\n${avisoTaskAssistantScript}\n${avisoOpenHookScript}\n${avisoAutoClickScript}\n${rewardWatcherScript}`
+                `${avisoTaskCounterScript}\n${avisoOpenHookScript}\n${avisoAutoClickScript}\n${rewardWatcherScript}\n${startWatchingClickerScript}`
               );
             }}
             onShouldStartLoadWithRequest={(req) => {
@@ -840,11 +1079,13 @@ export default function App() {
             sharedCookiesEnabled
             thirdPartyCookiesEnabled
             setSupportMultipleWindows={false}
-            injectedJavaScriptBeforeContentLoaded={youtubeWatcherScript}
-            injectedJavaScript={`${youtubeWatcherScript}\n${videoMonitorScript}`}
+            injectedJavaScriptBeforeContentLoaded={`${youtubeWatcherScript}\n${startWatchingClickerScript}\n${adSkipperScript}`}
+            injectedJavaScript={`${youtubeWatcherScript}\n${videoMonitorScript}\n${startWatchingClickerScript}\n${adSkipperScript}`}
             onMessage={handleWebMessage}
             onLoadEnd={() => {
-              bottomWebview.current?.injectJavaScript(`${youtubeWatcherScript}\n${videoMonitorScript}`);
+              bottomWebview.current?.injectJavaScript(
+                `${youtubeWatcherScript}\n${videoMonitorScript}\n${startWatchingClickerScript}\n${adSkipperScript}`
+              );
             }}
             onNavigationStateChange={(navState) => {
               if (!navState.loading && navState.url) {
@@ -893,6 +1134,24 @@ export default function App() {
             ))}
           </View>
 
+          {/* Délai après visionnage */}
+          <View style={styles.panel}>
+            <Text style={styles.panelTitle}>Délai après visionnage</Text>
+            <Text style={styles.panelHint}>
+              Temps d'attente (en secondes) avant de passer à la tâche suivante après avoir regardé une vidéo. 3s par défaut.
+            </Text>
+            <View style={styles.delayRow}>
+              <TextInput
+                value={String(watchDelay)}
+                onChangeText={updateWatchDelay}
+                keyboardType="numeric"
+                style={styles.delayInput}
+                maxLength={3}
+              />
+              <Text style={styles.delayUnit}>secondes</Text>
+            </View>
+          </View>
+
           <View style={styles.panel}>
             <Text style={styles.panelTitle}>Importer un cookie</Text>
             <Text style={styles.panelHint}>
@@ -922,56 +1181,6 @@ export default function App() {
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
-
-  // ==========================================================================
-  // FONCTIONS ACCUEIL (déclarées après pour clarté mais hoist via function)
-  // ==========================================================================
-  async function saveCookies() {
-    if (!cookieText.trim()) {
-      Alert.alert('Cookies manquants', 'Collez d’abord le texte des cookies.');
-      return;
-    }
-    if (!parsedCount) {
-      Alert.alert('Format non reconnu', 'Utilisez par exemple : nom=valeur; autre=valeur, ou un tableau JSON de cookies.');
-      return;
-    }
-    await SecureStore.setItemAsync(COOKIE_KEY, cookieText);
-    setSavedCookieText(cookieText);
-    setSaved(true);
-    Alert.alert('Cookies enregistrés', `${parsedCount} cookie(s) seront utilisés.`);
-  }
-
-  async function openSite() {
-    const stored = await SecureStore.getItemAsync(COOKIE_KEY);
-    if (stored) {
-      setCookieText(stored);
-      setSavedCookieText(stored);
-      setSaved(true);
-    } else {
-      Alert.alert('Cookies non enregistrés', 'Enregistrez d’abord les cookies pour les utiliser sur Aviso.');
-      return;
-    }
-    let restored = false;
-    try {
-      restored = await restoreNativeCookies(stored, SITES.aviso.url);
-    } catch (_) {
-      restored = false;
-    }
-    if (!restored && cookiePairs(stored).length === 0) {
-      Alert.alert('Cookies non reconnus', 'Collez le fichier JSON complet exporté par Electron.');
-      return;
-    }
-    setAvisoTaskCount(null);
-    setAutomationPaused(true);
-    setBottomUrl(SITES.youtube.url);
-    setBottomTitle('YOUTUBE — accueil');
-    setLastClickedTask(null);
-    setCurrentTaskTime(0);
-    setCurrentTaskId(null);
-    setVideoWatchedEnough(false);
-    setVideoProgress({ current: 0, duration: 0, isAd: false });
-    setSplitMode(true);
-  }
 }
 
 // ============================================================================
@@ -990,7 +1199,7 @@ const styles = StyleSheet.create({
   siteIcon: { color: '#64d2ff', fontSize: 30, fontWeight: '900' },
   siteName: { color: '#f4f7fb', fontSize: 19, fontWeight: '800', marginTop: 24 },
   siteAction: { color: '#8595b1', marginTop: 6 },
-  panel: { backgroundColor: '#11192b', borderRadius: 18, padding: 18, marginTop: 24, borderWidth: 1, borderColor: '#202e49' },
+  panel: { backgroundColor: '#11192b', borderRadius: 18, padding: 18, marginTop: 20, borderWidth: 1, borderColor: '#202e49' },
   panelTitle: { color: '#f4f7fb', fontSize: 19, fontWeight: '800' },
   panelHint: { color: '#8998b3', fontSize: 13, lineHeight: 19, marginTop: 8 },
   cookieInput: { color: '#e9effb', backgroundColor: '#0a1020', borderRadius: 12, borderWidth: 1, borderColor: '#2a3a5e', minHeight: 130, marginTop: 16, padding: 14, textAlignVertical: 'top', fontSize: 13 },
@@ -999,6 +1208,20 @@ const styles = StyleSheet.create({
   saveButton: { backgroundColor: '#64d2ff', borderRadius: 10, paddingHorizontal: 16, paddingVertical: 11 },
   saveText: { color: '#07101e', fontWeight: '800' },
   warning: { color: '#d29b6c', fontSize: 11, lineHeight: 16, marginTop: 14 },
+  delayRow: { flexDirection: 'row', alignItems: 'center', marginTop: 14 },
+  delayInput: {
+    color: '#e9effb',
+    backgroundColor: '#0a1020',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#2a3a5e',
+    width: 90,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    fontSize: 16,
+    textAlign: 'center',
+  },
+  delayUnit: { color: '#9ba8be', marginLeft: 12, fontSize: 14 },
   webContainer: { flex: 1, backgroundColor: '#0b1020' },
   webHeader: { minHeight: 58, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 14 },
   backButton: { paddingVertical: 8, paddingRight: 12, minWidth: 78 },
@@ -1006,8 +1229,9 @@ const styles = StyleSheet.create({
   webTitleBlock: { alignItems: 'center', flex: 1 },
   webTitle: { color: '#f4f7fb', fontWeight: '800', fontSize: 16 },
   taskBadge: { color: '#07101e', backgroundColor: '#64d2ff', borderRadius: 10, paddingHorizontal: 9, paddingVertical: 3, marginTop: 3, fontSize: 12, fontWeight: '800' },
-  reloadButton: { paddingVertical: 8, paddingLeft: 12, minWidth: 78, alignItems: 'flex-end' },
-  reloadText: { color: '#9ba8be', fontSize: 13 },
+  reloadButton: { paddingVertical: 8, paddingHorizontal: 12, minWidth: 78, alignItems: 'flex-end' },
+  pauseButton: { backgroundColor: '#2a1520', borderRadius: 8 },
+  reloadText: { color: '#9ba8be', fontSize: 13, fontWeight: '700' },
   assistantStatus: { color: '#9ba8be', fontSize: 12, paddingHorizontal: 14, paddingVertical: 6, backgroundColor: '#11192b' },
   avisoPane: { flex: 1.1, minHeight: 0, borderBottomWidth: 2, borderBottomColor: '#263452' },
   bottomPane: { flex: 0.9, minHeight: 0 },
