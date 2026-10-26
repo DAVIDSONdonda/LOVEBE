@@ -138,6 +138,227 @@ function extractVideoId(url) {
 }
 
 // ============================================================================
+// SCRIPT DE PROTECTION ANTI-DÉTECTION (injecté dans tous les WebViews)
+// ============================================================================
+
+const androidFingerprintProtection = `
+(function() {
+  if (window.__fpProtectionInstalled) return true;
+  window.__fpProtectionInstalled = true;
+
+  // ============ 1. Masquer navigator.webdriver ============
+  try {
+    Object.defineProperty(navigator, 'webdriver', {
+      get: () => undefined,
+      configurable: true
+    });
+  } catch(e) {}
+
+  // ============ 2. User-Agent réaliste (Windows Chrome) ============
+  const fakeUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+  try {
+    Object.defineProperty(navigator, 'userAgent', {
+      get: () => fakeUA,
+      configurable: true
+    });
+  } catch(e) {}
+
+  // ============ 3. Platform cohérente ============
+  try {
+    Object.defineProperty(navigator, 'platform', {
+      get: () => 'Win32',
+      configurable: true
+    });
+  } catch(e) {}
+
+  // ============ 4. hardwareConcurrency ============
+  try {
+    Object.defineProperty(navigator, 'hardwareConcurrency', {
+      get: () => 8,
+      configurable: true
+    });
+  } catch(e) {}
+
+  // ============ 5. deviceMemory ============
+  try {
+    Object.defineProperty(navigator, 'deviceMemory', {
+      get: () => 8,
+      configurable: true
+    });
+  } catch(e) {}
+
+  // ============ 6. languages ============
+  try {
+    Object.defineProperty(navigator, 'languages', {
+      get: () => ['fr-FR', 'fr', 'en-US', 'en'],
+      configurable: true
+    });
+    Object.defineProperty(navigator, 'language', {
+      get: () => 'fr-FR',
+      configurable: true
+    });
+  } catch(e) {}
+
+  // ============ 7. Plugins Chrome réalistes ============
+  try {
+    const fakePlugins = [
+      { name: 'PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+      { name: 'Chrome PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+      { name: 'Chromium PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+      { name: 'Microsoft Edge PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+      { name: 'WebKit built-in PDF', filename: 'internal-pdf-viewer', description: 'Portable Document Format' }
+    ];
+    Object.defineProperty(navigator, 'plugins', {
+      get: () => fakePlugins,
+      configurable: true
+    });
+  } catch(e) {}
+
+  // ============ 8. Canvas fingerprinting (bruit) ============
+  try {
+    const originalToDataURL = HTMLCanvasElement.prototype.toDataURL;
+    HTMLCanvasElement.prototype.toDataURL = function(...args) {
+      const result = originalToDataURL.apply(this, args);
+      if (Math.random() < 0.1) {
+        const noise = Math.random().toString(36).substring(2, 8);
+        return result.substring(0, result.length - 10) + noise + result.substring(result.length - 4);
+      }
+      return result;
+    };
+
+    const originalGetImageData = CanvasRenderingContext2D.prototype.getImageData;
+    CanvasRenderingContext2D.prototype.getImageData = function(...args) {
+      const imageData = originalGetImageData.apply(this, args);
+      if (Math.random() < 0.05) {
+        const data = imageData.data;
+        for (let i = 0; i < Math.min(100, data.length); i += 4) {
+          const idx = Math.floor(Math.random() * (data.length / 4)) * 4;
+          if (idx < data.length) data[idx] = (data[idx] + Math.random() * 2) % 256;
+        }
+      }
+      return imageData;
+    };
+  } catch(e) {}
+
+  // ============ 9. WebGL vendor/renderer spoofés ============
+  try {
+    const originalGetParameter = WebGLRenderingContext.prototype.getParameter;
+    WebGLRenderingContext.prototype.getParameter = function(p) {
+      if (p === 37445) return 'Google Inc. (Intel)';
+      if (p === 37446) return 'ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0)';
+      return originalGetParameter.call(this, p);
+    };
+    if (typeof WebGL2RenderingContext !== 'undefined') {
+      const originalGetParameter2 = WebGL2RenderingContext.prototype.getParameter;
+      WebGL2RenderingContext.prototype.getParameter = function(p) {
+        if (p === 37445) return 'Google Inc. (Intel)';
+        if (p === 37446) return 'ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0)';
+        return originalGetParameter2.call(this, p);
+      };
+    }
+  } catch(e) {}
+
+  // ============ 10. WebRTC leaks bloqués ============
+  try {
+    if (window.RTCPeerConnection) {
+      const originalRTC = window.RTCPeerConnection;
+      window.RTCPeerConnection = function(config) {
+        if (config && config.iceServers) {
+          config.iceServers = config.iceServers.map(s => {
+            if (s.urls && typeof s.urls === 'string' && s.urls.startsWith('stun:')) {
+              return { urls: 'stun:stun.l.google.com:19302' };
+            }
+            return s;
+          });
+        }
+        return new originalRTC(config);
+      };
+      window.RTCPeerConnection.prototype = originalRTC.prototype;
+    }
+  } catch(e) {}
+
+  // ============ 11. window.chrome présent ============
+  try {
+    if (!window.chrome) {
+      window.chrome = {
+        runtime: {},
+        loadTimes: function() {},
+        csi: function() {},
+        app: {}
+      };
+    }
+  } catch(e) {}
+
+  // ============ 12. Supprimer les traces WebView ============
+  try {
+    delete window.process;
+    delete window.require;
+    delete window.module;
+    delete window.__dirname;
+    delete window.__filename;
+  } catch(e) {}
+
+  // ============ 13. Screen dimensions ============
+  try {
+    Object.defineProperty(screen, 'width', { get: () => 1920, configurable: true });
+    Object.defineProperty(screen, 'height', { get: () => 1080, configurable: true });
+    Object.defineProperty(screen, 'availWidth', { get: () => 1920, configurable: true });
+    Object.defineProperty(screen, 'availHeight', { get: () => 1040, configurable: true });
+    Object.defineProperty(screen, 'colorDepth', { get: () => 24, configurable: true });
+    Object.defineProperty(screen, 'pixelDepth', { get: () => 24, configurable: true });
+  } catch(e) {}
+
+  // ============ 14. Timezone ============
+  try {
+    Date.prototype.getTimezoneOffset = function() {
+      return -60; // Europe/Paris
+    };
+  } catch(e) {}
+
+  // ============ 15. AudioContext bruité ============
+  try {
+    if (window.AudioBuffer) {
+      const originalGetChannelData = AudioBuffer.prototype.getChannelData;
+      AudioBuffer.prototype.getChannelData = function(channel) {
+        const data = originalGetChannelData.apply(this, arguments);
+        for (let i = 0; i < data.length; i += 100) {
+          data[i] = data[i] + (Math.random() - 0.5) * 1e-7;
+        }
+        return data;
+      };
+    }
+  } catch(e) {}
+
+  // ============ 16. Notification.permission ============
+  try {
+    if (window.Notification) {
+      Object.defineProperty(Notification, 'permission', {
+        get: () => 'default',
+        configurable: true
+      });
+    }
+  } catch(e) {}
+
+  // ============ 17. Permissions API cohérente ============
+  try {
+    if (navigator.permissions) {
+      const originalQuery = navigator.permissions.query.bind(navigator.permissions);
+      navigator.permissions.query = function(desc) {
+        if (desc && desc.name === 'notifications') {
+          return Promise.resolve({ state: 'default', onchange: null });
+        }
+        return originalQuery(desc);
+      };
+    }
+  } catch(e) {}
+
+  console.log('[ANDROID-FP] Protection fingerprinting installée');
+  return true;
+})();
+true;
+`;
+
+// ============================================================================
 // SCRIPTS INJECTÉS
 // ============================================================================
 
@@ -404,7 +625,7 @@ const rewardWatcherScript = `
         send({ type: 'rewardSuccess' });
       }
 
-      if (bodyText.indexOf('площадка не найдена') !== -1) {
+      if (bodyText.indexOf('площадь не найдена') !== -1) {
         send({ type: 'taskNotFound' });
       }
     } catch(e) {}
@@ -528,6 +749,7 @@ export default function App() {
   const [videoWatchedEnough, setVideoWatchedEnough] = useState(false);
   const [videoStarted, setVideoStarted] = useState(false);
   const [rewardAlreadyClicked, setRewardAlreadyClicked] = useState(false);
+  const [countedRewardIds, setCountedRewardIds] = useState(new Set());
   const [successCount, setSuccessCount] = useState(0);
 
   const avisoWebview = useRef(null);
@@ -612,7 +834,6 @@ export default function App() {
       setVideoProgress({ current: 0, duration: 0, isAd: false, paused: true });
       setLastClickedTask(null);
 
-      // Relance immédiate de __avisoAutoClick() (pas de reload si tâches dans le DOM)
       setTimeout(() => {
         if (!automationPaused) {
           const script = `${avisoOpenHookScript}\n${avisoAutoClickScript}\nwindow.__avisoAutoClick();true;`;
@@ -629,7 +850,6 @@ export default function App() {
         setRewardAlreadyClicked(false);
         setVideoProgress({ current: 0, duration: 0, isAd: false, paused: true });
         if (!automationPaused) {
-          // En cas d'erreur, on programme le reload 20-30s (comme si aucune tâche)
           scheduleNoTaskReload();
         }
       }, 2000);
@@ -668,11 +888,9 @@ export default function App() {
           setVideoProgress({ current: 0, duration: 0, isAd: false, paused: true });
           setAssistantStatus(`Tâche ${message.id} cliquée (${message.time}s) · attente de la redirection…`);
         } else if (message.status === 'empty') {
-          // ⬇️ Aucune tâche → programme le reload 20-30s
           scheduleNoTaskReload();
         } else if (message.status === 'error') {
           setAssistantStatus(`Erreur clic : ${message.message}`);
-          // En cas d'erreur, on programme aussi un reload 20-30s
           scheduleNoTaskReload();
         }
       }
@@ -748,20 +966,29 @@ export default function App() {
       }
 
       if (message.type === 'rewardAvailable') {
+        const rewardId = message.id;
+        if (!rewardId) return;
+
+        setCountedRewardIds(prev => {
+          if (prev.has(rewardId)) return prev;
+          const next = new Set(prev);
+          next.add(rewardId);
+          setSuccessCount(next.size);
+          console.log(`[AUTO] Nouvelle récompense détectée: ${rewardId} (total: ${next.size})`);
+          return next;
+        });
+
         if (!rewardAlreadyClicked) {
           setRewardAlreadyClicked(true);
-          setAssistantStatus(`💰 Récompense réclamée pour la tâche ${message.id}`);
-          console.log('[AUTO] Reward réclamée:', message.id);
+          setAssistantStatus(`💰 Récompense détectée pour la tâche ${rewardId}`);
         }
       }
 
       if (message.type === 'rewardSuccess') {
-        const newCount = successCount + 1;
-        setSuccessCount(newCount);
         if (currentTaskTime > 0) {
-          setAssistantStatus(`✅ Récompense confirmée ! Total : ${newCount} · minuteur continue (${videoProgress.current.toFixed(0)}/${currentTaskTime}s)`);
+          setAssistantStatus(`✅ Tâche validée · minuteur continue (${videoProgress.current.toFixed(0)}/${currentTaskTime}s)`);
         } else {
-          setAssistantStatus(`✅ Récompense confirmée ! Total : ${newCount}`);
+          setAssistantStatus(`✅ Tâche validée`);
         }
       }
 
@@ -779,7 +1006,6 @@ export default function App() {
           setRewardAlreadyClicked(false);
           setVideoProgress({ current: 0, duration: 0, isAd: false, paused: true });
           if (!automationPaused) {
-            // ⬇️ Programme le reload 20-30s (comme si aucune tâche)
             scheduleNoTaskReload();
           }
         }, 2000);
@@ -830,7 +1056,7 @@ export default function App() {
       if (!next) {
         setTimeout(() => {
           avisoWebview.current?.injectJavaScript(
-            `${avisoTaskCounterScript}\n${avisoTaskAssistantScript}\n${avisoOpenHookScript}\n${avisoAutoClickScript}\n${rewardWatcherScript}`
+            `${androidFingerprintProtection}\n${avisoTaskCounterScript}\n${avisoTaskAssistantScript}\n${avisoOpenHookScript}\n${avisoAutoClickScript}\n${rewardWatcherScript}`
           );
           console.log('[AUTO] Scripts réinjectés après sortie headless');
         }, 300);
@@ -959,14 +1185,14 @@ export default function App() {
             sharedCookiesEnabled
             thirdPartyCookiesEnabled
             setSupportMultipleWindows={false}
-            injectedJavaScriptBeforeContentLoaded={`${cookieScript(savedCookieText, SITES.aviso.url)}\n${avisoOpenHookScript}`}
-            injectedJavaScript={`${avisoTaskCounterScript}\n${avisoTaskAssistantScript}\n${avisoOpenHookScript}\n${avisoAutoClickScript}\n${rewardWatcherScript}`}
+            applicationNameForUserAgent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+            injectedJavaScriptBeforeContentLoaded={`${androidFingerprintProtection}\n${cookieScript(savedCookieText, SITES.aviso.url)}\n${avisoOpenHookScript}`}
+            injectedJavaScript={`${androidFingerprintProtection}\n${avisoTaskCounterScript}\n${avisoTaskAssistantScript}\n${avisoOpenHookScript}\n${avisoAutoClickScript}\n${rewardWatcherScript}`}
             onMessage={handleWebMessage}
             onLoadEnd={() => {
               avisoWebview.current?.injectJavaScript(
-                `${avisoTaskCounterScript}\n${avisoTaskAssistantScript}\n${avisoOpenHookScript}\n${avisoAutoClickScript}\n${rewardWatcherScript}`
+                `${androidFingerprintProtection}\n${avisoTaskCounterScript}\n${avisoTaskAssistantScript}\n${avisoOpenHookScript}\n${avisoAutoClickScript}\n${rewardWatcherScript}`
               );
-              // ⬇️ Si on vient de recharger à cause d'une absence de tâche, relance
               if (pendingReload.current) {
                 pendingReload.current = false;
                 if (!automationPaused) {
@@ -1019,11 +1245,12 @@ export default function App() {
             sharedCookiesEnabled
             thirdPartyCookiesEnabled
             setSupportMultipleWindows={false}
-            injectedJavaScriptBeforeContentLoaded={youtubeWatcherScript}
-            injectedJavaScript={`${youtubeWatcherScript}\n${videoMonitorScript}`}
+            applicationNameForUserAgent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+            injectedJavaScriptBeforeContentLoaded={`${androidFingerprintProtection}\n${youtubeWatcherScript}`}
+            injectedJavaScript={`${androidFingerprintProtection}\n${youtubeWatcherScript}\n${videoMonitorScript}`}
             onMessage={handleWebMessage}
             onLoadEnd={() => {
-              bottomWebview.current?.injectJavaScript(`${youtubeWatcherScript}\n${videoMonitorScript}`);
+              bottomWebview.current?.injectJavaScript(`${androidFingerprintProtection}\n${youtubeWatcherScript}\n${videoMonitorScript}`);
             }}
             onNavigationStateChange={(navState) => {
               if (!navState.loading && navState.url) {
