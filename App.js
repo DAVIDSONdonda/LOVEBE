@@ -22,6 +22,10 @@ const SITES = {
   aviso: { label: 'Aviso', url: 'https://aviso.bz/tasks-youtube' },
 };
 
+// ============================================================================
+// HELPERS COOKIES (inchangés)
+// ============================================================================
+
 function cookiePairs(raw) {
   const text = (raw || '').trim();
   if (!text) return [];
@@ -80,8 +84,6 @@ async function restoreNativeCookies(raw, url) {
   if (!records.length) return false;
   for (const cookie of records) {
     try {
-      // setFromResponse accepte un vrai en-tête Set-Cookie et conserve
-      // notamment HttpOnly, Secure et l’expiration de PHPSESSID.
       await CookieManager.setFromResponse(url, cookieHeader(cookie));
     } catch (_) {
       try {
@@ -111,8 +113,71 @@ function cookieScript(raw, url) {
   return `${statements.join('')}true;`;
 }
 
-// Aviso affiche les tâches sous la forme de spans link_ads_start_<id>.
-// Le MutationObserver permet de mettre à jour le compteur après un chargement AJAX.
+// ============================================================================
+// HELPERS YOUTUBE (nouveaux)
+// ============================================================================
+
+// Extrait l'ID vidéo YouTube depuis une URL
+function extractVideoId(url) {
+  if (!url) return null;
+  try {
+    const u = new URL(url);
+    if (u.hostname.includes('youtube.com')) {
+      const v = u.searchParams.get('v');
+      if (v) return v;
+    }
+    if (u.hostname === 'youtu.be') {
+      return u.pathname.replace(/^\/+/, '').split(/[?#]/)[0];
+    }
+    if (u.hostname.includes('youtube.com') && u.pathname.includes('/embed/')) {
+      const m = u.pathname.match(/\/embed\/([^/?]+)/);
+      if (m && m[1]) return m[1];
+    }
+    if (u.hostname.includes('google.com') && u.searchParams.has('url')) {
+      return extractVideoId(u.searchParams.get('url'));
+    }
+  } catch (_) {}
+  const m = url.match(/(?:v=|youtu\.be\/|embed\/)([a-zA-Z0-9_-]{11})/);
+  return m ? m[1] : null;
+}
+
+// Résout une URL Aviso /go/ en URL YouTube finale
+function resolveAvisoGoUrl(url, baseUrl = 'https://aviso.bz') {
+  if (!url) return null;
+
+  // Si déjà YouTube → ok
+  if (url.includes('youtube.com') || url.includes('youtu.be')) {
+    // Clean possible encodage double
+    try {
+      const decoded = decodeURIComponent(url);
+      if (decoded.includes('youtube.com') || decoded.includes('youtu.be')) return decoded;
+    } catch (_) {}
+    return url;
+  }
+
+  // Chercher go_url= dans les query params
+  try {
+    const fullUrl = url.startsWith('http') ? url : new URL(url, baseUrl).toString();
+    const u = new URL(fullUrl);
+    const goUrl = u.searchParams.get('go_url');
+    if (goUrl) {
+      try {
+        const decoded = decodeURIComponent(goUrl);
+        if (decoded.includes('youtube.com') || decoded.includes('youtu.be')) return decoded;
+        return decoded;
+      } catch (_) {
+        return goUrl;
+      }
+    }
+  } catch (_) {}
+  return null;
+}
+
+// ============================================================================
+// SCRIPTS INJECTÉS
+// ============================================================================
+
+// Compteur de tâches (inchangé)
 const avisoTaskCounterScript = `
 (function() {
   if (window.__avisoTaskCounterInstalled) {
@@ -140,9 +205,7 @@ const avisoTaskCounterScript = `
 true;
 `;
 
-// Assistance à l'exécution : prépare la tâche la plus courte, la centre et
-// informe l'application de son état. Le lancement de la tâche et la validation
-// restent visibles et contrôlables par l'utilisateur dans Aviso.
+// Assistant manuel (inchangé, conservé pour compatibilité)
 const avisoTaskAssistantScript = `
 (function() {
   if (window.__avisoAssistantInstalled) {
@@ -175,7 +238,7 @@ const avisoTaskAssistantScript = `
     window.__avisoAssistantStart = function() {
       var nodes = Array.from(document.querySelectorAll('span[id^="link_ads_start_"]')).filter(visible);
       if (!nodes.length) {
-        send({ type: 'avisoAssistant', status: 'empty', message: 'Aucune tâche disponible pour le moment.' });
+        send({ type: 'avisoAssistant', status: 'empty', message: 'Aucune tâche disponible.' });
         return;
       }
       nodes.sort(function(a, b) { return taskTime(a) - taskTime(b); });
@@ -204,6 +267,159 @@ const avisoTaskAssistantScript = `
 true;
 `;
 
+// Hook window.open : capture les redirections YouTube (injecté AVANT chargement)
+const avisoOpenHookScript = `
+(function() {
+  if (window.__avisoOpenHooked) return true;
+  window.__avisoOpenHooked = true;
+
+  function report(url, source) {
+    try {
+      window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify({
+        type: 'youtubeRedirect',
+        url: url,
+        source: source
+      }));
+    } catch(e) {}
+  }
+
+  // --- Cas 1 : window.open ---
+  var originalOpen = window.open;
+  window.open = function(url, target, features) {
+    if (url && (url.indexOf('youtube.com') !== -1 || url.indexOf('youtu.be') !== -1 || url.indexOf('/go/') !== -1)) {
+      report(url, 'window.open');
+      return null;
+    }
+    return originalOpen.apply(window, arguments);
+  };
+
+  // --- Cas 2 : clic sur <a> vers YouTube ou /go/ ---
+  document.addEventListener('click', function(ev) {
+    var el = ev.target;
+    while (el && el !== document.body) {
+      if (el.tagName === 'A' && el.href) {
+        var h = el.href;
+        if (h.indexOf('youtube.com') !== -1 || h.indexOf('youtu.be') !== -1) {
+          report(h, 'a-click');
+          ev.preventDefault();
+          ev.stopPropagation();
+          return false;
+        }
+        if (h.indexOf('/go/') !== -1 && h.indexOf('aviso.bz') !== -1) {
+          report(h, 'a-click-go');
+          ev.preventDefault();
+          ev.stopPropagation();
+          return false;
+        }
+      }
+      el = el.parentElement;
+    }
+  }, true);
+
+  // --- Cas 3 : form submit ---
+  document.addEventListener('submit', function(ev) {
+    var action = ev.target && ev.target.action;
+    if (action && (action.indexOf('youtube.com') !== -1 || action.indexOf('/go/') !== -1)) {
+      report(action, 'form-submit');
+      ev.preventDefault();
+      return false;
+    }
+  }, true);
+
+  true;
+})();
+true;
+`;
+
+// Clic auto sur la tâche la plus courte (appelé depuis RN)
+const avisoAutoClickScript = `
+(function() {
+  function extractTime(taskElement) {
+    var id = taskElement.id.replace('link_ads_start_', '');
+    var timerInput = document.getElementById('ads_timer_' + id);
+    if (timerInput && timerInput.value) {
+      var val = parseInt(timerInput.value, 10);
+      if (!isNaN(val) && val > 0) return val;
+    }
+    var onclickAttr = taskElement.getAttribute('onclick');
+    if (onclickAttr) {
+      var match = onclickAttr.match(/, ['"](\\d+)['"]/);
+      if (match && match[1]) {
+        var v = parseInt(match[1], 10);
+        if (!isNaN(v) && v > 0) return v;
+      }
+    }
+    try {
+      var row = taskElement.closest('tr');
+      if (row) {
+        var timeSpan = row.querySelector('span.serf-text');
+        if (timeSpan) {
+          var tm = timeSpan.innerText.match(/(\\d+)\\s*сек/);
+          if (tm && tm[1]) {
+            var t = parseInt(tm[1], 10);
+            if (!isNaN(t) && t > 0) return t;
+          }
+        }
+      }
+    } catch(e) {}
+    return 999;
+  }
+
+  function send(message) {
+    window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify(message));
+  }
+
+  window.__avisoAutoClick = function() {
+    try {
+      var tasks = document.querySelectorAll('span[id^="link_ads_start_"]');
+      var visible = Array.from(tasks).filter(function(t) { return t.offsetParent !== null; });
+      if (visible.length === 0) {
+        send({ type: 'autoClickResult', status: 'empty', message: 'Aucune tâche disponible' });
+        return;
+      }
+      var withTime = visible.map(function(t) {
+        return {
+          el: t,
+          id: t.id.replace('link_ads_start_', ''),
+          time: extractTime(t)
+        };
+      });
+      withTime.sort(function(a, b) { return a.time - b.time; });
+      var chosen = withTime[0];
+
+      // Marquage visuel
+      document.querySelectorAll('[data-aviso-assistant="selected"]').forEach(function(el) {
+        el.style.outline = '';
+        el.removeAttribute('data-aviso-assistant');
+      });
+      chosen.el.setAttribute('data-aviso-assistant', 'selected');
+      chosen.el.style.outline = '3px solid #64d2ff';
+      try { chosen.el.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch(e) {}
+
+      send({
+        type: 'autoClickResult',
+        status: 'clicked',
+        id: chosen.id,
+        time: chosen.time,
+        total: withTime.length
+      });
+
+      // Clic (déclenche le hook window.open)
+      chosen.el.click();
+    } catch(e) {
+      send({ type: 'autoClickResult', status: 'error', message: e.message });
+    }
+  };
+
+  true;
+})();
+true;
+`;
+
+// ============================================================================
+// COMPOSANT PRINCIPAL
+// ============================================================================
+
 export default function App() {
   const [splitMode, setSplitMode] = useState(false);
   const [automationPaused, setAutomationPaused] = useState(true);
@@ -213,6 +429,8 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [avisoTaskCount, setAvisoTaskCount] = useState(null);
   const [assistantStatus, setAssistantStatus] = useState('Prêt');
+  const [youtubeUrl, setYoutubeUrl] = useState(SITES.youtube.url);
+  const [lastClickedTask, setLastClickedTask] = useState(null);
   const avisoWebview = useRef(null);
   const youtubeWebview = useRef(null);
 
@@ -228,6 +446,7 @@ export default function App() {
   }, []);
 
   const parsedCount = useMemo(() => cookiePairs(cookieText).length, [cookieText]);
+
   const saveCookies = async () => {
     if (!cookieText.trim()) {
       Alert.alert('Cookies manquants', 'Collez d’abord le texte des cookies.');
@@ -240,11 +459,10 @@ export default function App() {
     await SecureStore.setItemAsync(COOKIE_KEY, cookieText);
     setSavedCookieText(cookieText);
     setSaved(true);
-    Alert.alert('Cookies enregistrés', `${parsedCount} cookie(s) seront utilisés pour Aviso et le site sélectionné.`);
+    Alert.alert('Cookies enregistrés', `${parsedCount} cookie(s) seront utilisés.`);
   };
 
   const openSite = async () => {
-    // Toujours relire SecureStore : un texte modifié mais non enregistré ne doit pas être utilisé.
     const stored = await SecureStore.getItemAsync(COOKIE_KEY);
     if (stored) {
       setCookieText(stored);
@@ -266,13 +484,22 @@ export default function App() {
     }
     setAvisoTaskCount(null);
     setAutomationPaused(true);
+    setYoutubeUrl(SITES.youtube.url);
+    setLastClickedTask(null);
     setSplitMode(true);
   };
 
+  // ==========================================================================
+  // HANDLER MESSAGES WEBVIEW
+  // ==========================================================================
   const handleWebMessage = (event) => {
     try {
       const message = JSON.parse(event.nativeEvent.data);
-      if (message.type === 'avisoTaskCount') setAvisoTaskCount(Number(message.count) || 0);
+
+      if (message.type === 'avisoTaskCount') {
+        setAvisoTaskCount(Number(message.count) || 0);
+      }
+
       if (message.type === 'avisoAssistant') {
         if (message.status === 'ready') {
           setAssistantStatus(`Tâche ${message.id} prête · ${message.seconds >= 999 ? 'durée inconnue' : `${message.seconds}s`} · ${message.total} disponible(s)`);
@@ -282,7 +509,70 @@ export default function App() {
           setAssistantStatus(message.message);
         }
       }
-    } catch (_) {}
+
+      if (message.type === 'autoClickResult') {
+        if (message.status === 'clicked') {
+          setLastClickedTask({ id: message.id, time: message.time });
+          setAssistantStatus(`Tâche ${message.id} cliquée (${message.time}s) · attente de la redirection…`);
+        } else if (message.status === 'empty') {
+          setAssistantStatus('Aucune tâche disponible');
+        } else if (message.status === 'error') {
+          setAssistantStatus(`Erreur clic : ${message.message}`);
+        }
+      }
+
+      if (message.type === 'youtubeRedirect') {
+        console.log('[AUTO] Redirect capturé:', message.source, message.url);
+        const finalUrl = resolveAvisoGoUrl(message.url, SITES.aviso.url);
+        console.log('[AUTO] URL finale résolue:', finalUrl);
+
+        if (finalUrl) {
+          const videoId = extractVideoId(finalUrl);
+          console.log('[AUTO] Video ID:', videoId);
+          setYoutubeUrl(finalUrl);
+          setAssistantStatus(`YouTube lancé${videoId ? ` · ${videoId}` : ''}`);
+        } else {
+          // Fallback : suivre le redirect via fetch
+          console.log('[AUTO] Pas de go_url, tentative fetch redirect…');
+          const absolute = message.url.startsWith('http')
+            ? message.url
+            : new URL(message.url, SITES.aviso.url).toString();
+
+          fetch(absolute, {
+            method: 'GET',
+            redirect: 'follow',
+            headers: { 'Accept': 'text/html' },
+          })
+            .then((res) => {
+              const resolved = res.url;
+              console.log('[AUTO] Après redirect:', resolved);
+              const videoId = extractVideoId(resolved);
+              if (videoId || resolved.includes('youtube.com') || resolved.includes('youtu.be')) {
+                setYoutubeUrl(resolved);
+                setAssistantStatus(`YouTube lancé · ${videoId || 'URL directe'}`);
+              } else {
+                setAssistantStatus(`Redirect inattendu : ${resolved}`);
+              }
+            })
+            .catch((err) => {
+              console.log('[AUTO] Erreur fetch:', err.message);
+              setAssistantStatus(`Impossible de résoudre l'URL: ${err.message}`);
+            });
+        }
+      }
+    } catch (err) {
+      console.log('[AUTO] Erreur handler message:', err.message);
+    }
+  };
+
+  // ==========================================================================
+  // ACTIONS UI
+  // ==========================================================================
+  const runAutoClick = () => {
+    setAutomationPaused(false);
+    setAssistantStatus('Recherche de la tâche la plus courte…');
+    const script = `${avisoOpenHookScript}\n${avisoAutoClickScript}\nwindow.__avisoAutoClick();true;`;
+    avisoWebview.current?.injectJavaScript(script);
   };
 
   const runAssistant = () => {
@@ -291,6 +581,15 @@ export default function App() {
     avisoWebview.current?.injectJavaScript(avisoTaskAssistantScript);
   };
 
+  const resetYoutube = () => {
+    setYoutubeUrl(SITES.youtube.url);
+    setLastClickedTask(null);
+    setAssistantStatus('Prêt');
+  };
+
+  // ==========================================================================
+  // RENDU
+  // ==========================================================================
   if (loading) {
     return <SafeAreaView style={styles.center}><ActivityIndicator color="#64d2ff" /></SafeAreaView>;
   }
@@ -304,15 +603,17 @@ export default function App() {
           </Pressable>
           <View style={styles.webTitleBlock}>
             <Text style={styles.webTitle}>Aviso + YouTube</Text>
-            <Text style={styles.taskBadge}>{avisoTaskCount === null ? 'Tâches : …' : `${avisoTaskCount} tâche${avisoTaskCount === 1 ? '' : 's'}`}</Text>
+            <Text style={styles.taskBadge}>
+              {avisoTaskCount === null ? 'Tâches : …' : `${avisoTaskCount} tâche${avisoTaskCount === 1 ? '' : 's'}`}
+            </Text>
           </View>
-          <Pressable onPress={runAssistant} style={styles.reloadButton}>
-            <Text style={styles.reloadText}>{automationPaused ? 'Préparer' : 'Rechercher'}</Text>
+          <Pressable onPress={runAutoClick} style={styles.reloadButton}>
+            <Text style={styles.reloadText}>▶ Auto</Text>
           </Pressable>
         </View>
         <Text style={styles.assistantStatus}>{assistantStatus}</Text>
         <View style={styles.avisoPane}>
-          <Text style={styles.paneLabel}>AVISO — assistance aux tâches</Text>
+          <Text style={styles.paneLabel}>AVISO — clic auto</Text>
           <WebView
             ref={avisoWebview}
             source={{ uri: SITES.aviso.url }}
@@ -320,25 +621,63 @@ export default function App() {
             domStorageEnabled
             sharedCookiesEnabled
             thirdPartyCookiesEnabled
-            injectedJavaScriptBeforeContentLoaded={cookieScript(savedCookieText, SITES.aviso.url)}
-            injectedJavaScript={`${avisoTaskCounterScript}\n${avisoTaskAssistantScript}`}
+            setSupportMultipleWindows={false}
+            injectedJavaScriptBeforeContentLoaded={`${cookieScript(savedCookieText, SITES.aviso.url)}\n${avisoOpenHookScript}`}
+            injectedJavaScript={`${avisoTaskCounterScript}\n${avisoTaskAssistantScript}\n${avisoOpenHookScript}\n${avisoAutoClickScript}`}
             onMessage={handleWebMessage}
-            onLoadEnd={() => avisoWebview.current?.injectJavaScript(`${avisoTaskCounterScript}\n${avisoTaskAssistantScript}`)}
+            onLoadEnd={() => {
+              // Réinjection de sécurité après chaque chargement
+              avisoWebview.current?.injectJavaScript(
+                `${avisoTaskCounterScript}\n${avisoTaskAssistantScript}\n${avisoOpenHookScript}\n${avisoAutoClickScript}`
+              );
+            }}
+            onShouldStartLoadWithRequest={(req) => {
+              const u = req.url || '';
+
+              // Navigation directe vers YouTube → bloquer + rediriger pane bas
+              if (u.includes('youtube.com') || u.includes('youtu.be')) {
+                console.log('[AUTO] onShouldStartLoadWithRequest → YouTube bloqué:', u);
+                const videoId = extractVideoId(u);
+                setYoutubeUrl(u);
+                setAssistantStatus(`YouTube lancé${videoId ? ` · ${videoId}` : ''}`);
+                return false;
+              }
+
+              // /go/ Aviso → bloqué (déjà capturé par hook JS)
+              if (u.includes('/go/') && u.includes('aviso.bz')) {
+                console.log('[AUTO] onShouldStartLoadWithRequest → /go/ bloqué:', u);
+                const finalUrl = resolveAvisoGoUrl(u, SITES.aviso.url);
+                if (finalUrl) {
+                  const videoId = extractVideoId(finalUrl);
+                  setYoutubeUrl(finalUrl);
+                  setAssistantStatus(`YouTube lancé${videoId ? ` · ${videoId}` : ''}`);
+                }
+                return false;
+              }
+
+              return true;
+            }}
             onError={() => Alert.alert('Erreur Aviso', 'Aviso n’a pas pu être chargé. Vérifiez votre connexion.')}
             startInLoadingState
             renderLoading={() => <View style={styles.center}><ActivityIndicator color="#64d2ff" /></View>}
           />
         </View>
         <View style={styles.youtubePane}>
-          <Text style={styles.paneLabel}>YOUTUBE — ouverture manuelle du lien choisi</Text>
+          <View style={styles.youtubeHeader}>
+            <Text style={styles.paneLabel}>YOUTUBE — vidéo chargée</Text>
+            <Pressable onPress={resetYoutube} style={styles.resetButton}>
+              <Text style={styles.resetText}>↺ Reset</Text>
+            </Pressable>
+          </View>
           <WebView
             ref={youtubeWebview}
-            source={{ uri: SITES.youtube.url }}
+            source={{ uri: youtubeUrl }}
+            key={youtubeUrl}
             javaScriptEnabled
             domStorageEnabled
             sharedCookiesEnabled
             thirdPartyCookiesEnabled
-            onError={() => Alert.alert('Erreur YouTube', 'YouTube n’a pas pu être chargé. Vérifiez votre connexion.')}
+            onError={() => Alert.alert('Erreur YouTube', 'YouTube n’a pas pu être chargé.')}
             startInLoadingState
             renderLoading={() => <View style={styles.center}><ActivityIndicator color="#ff5c7a" /></View>}
           />
@@ -347,13 +686,18 @@ export default function App() {
     );
   }
 
+  // ==========================================================================
+  // ACCUEIL
+  // ==========================================================================
   return (
     <SafeAreaView style={styles.safe}>
       <KeyboardAvoidingView style={styles.safe} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
         <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
-          <Text style={styles.kicker}>PROTOYPE ANDROID</Text>
+          <Text style={styles.kicker}>PROTOTYPE ANDROID</Text>
           <Text style={styles.title}>Ouvrir un site</Text>
-          <Text style={styles.subtitle}>Les cookies enregistrés sont réutilisés automatiquement à l’ouverture d’Aviso.</Text>
+          <Text style={styles.subtitle}>
+            Les cookies enregistrés sont réutilisés automatiquement à l’ouverture d’Aviso.
+          </Text>
 
           <View style={styles.choiceRow}>
             {Object.entries(SITES).map(([key, item]) => (
@@ -367,7 +711,9 @@ export default function App() {
 
           <View style={styles.panel}>
             <Text style={styles.panelTitle}>Importer un cookie</Text>
-            <Text style={styles.panelHint}>Collez ici le texte copié depuis votre navigateur. Il reste stocké localement et sera utilisé à la prochaine ouverture.</Text>
+            <Text style={styles.panelHint}>
+              Collez ici le texte copié depuis votre navigateur. Il reste stocké localement et sera utilisé à la prochaine ouverture.
+            </Text>
             <TextInput
               value={cookieText}
               onChangeText={(value) => { setCookieText(value); setSaved(false); }}
@@ -394,6 +740,9 @@ export default function App() {
   );
 }
 
+// ============================================================================
+// STYLES
+// ============================================================================
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: '#0b1020' },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: '#0b1020' },
@@ -425,7 +774,11 @@ const styles = StyleSheet.create({
   taskBadge: { color: '#07101e', backgroundColor: '#64d2ff', borderRadius: 10, paddingHorizontal: 9, paddingVertical: 3, marginTop: 3, fontSize: 12, fontWeight: '800' },
   reloadButton: { paddingVertical: 8, paddingLeft: 12, minWidth: 78, alignItems: 'flex-end' },
   reloadText: { color: '#9ba8be', fontSize: 13 },
+  assistantStatus: { color: '#9ba8be', fontSize: 12, paddingHorizontal: 14, paddingVertical: 6, backgroundColor: '#11192b' },
   avisoPane: { flex: 1.1, minHeight: 0, borderBottomWidth: 2, borderBottomColor: '#263452' },
   youtubePane: { flex: 0.9, minHeight: 0 },
+  youtubeHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: '#11192b' },
   paneLabel: { color: '#9ba8be', backgroundColor: '#11192b', paddingHorizontal: 10, paddingVertical: 5, fontSize: 11, fontWeight: '700' },
+  resetButton: { paddingHorizontal: 10, paddingVertical: 4 },
+  resetText: { color: '#64d2ff', fontSize: 11, fontWeight: '700' },
 });
