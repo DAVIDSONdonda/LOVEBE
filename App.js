@@ -520,7 +520,7 @@ export default function App() {
   const [lastClickedTask, setLastClickedTask] = useState(null);
 
   // ---- Mode headless ----
-  const [headlessMode, setHeadlessMode] = useState(false);  // ⬅️ NOUVEAU
+  const [headlessMode, setHeadlessMode] = useState(false);
 
   // ---- États du minuteur ----
   const [currentTaskTime, setCurrentTaskTime] = useState(0);
@@ -768,6 +768,22 @@ export default function App() {
     avisoWebview.current?.injectJavaScript(script);
   };
 
+  const toggleHeadless = () => {
+    setHeadlessMode(prev => {
+      const next = !prev;
+      if (!next) {
+        // Sortie du headless → réinjection de sécurité
+        setTimeout(() => {
+          avisoWebview.current?.injectJavaScript(
+            `${avisoTaskCounterScript}\n${avisoTaskAssistantScript}\n${avisoOpenHookScript}\n${avisoAutoClickScript}\n${rewardWatcherScript}`
+          );
+          console.log('[AUTO] Scripts réinjectés après sortie headless');
+        }, 300);
+      }
+      return next;
+    });
+  };
+
   const resetBottom = () => {
     setBottomUrl(SITES.youtube.url);
     setBottomTitle('YOUTUBE — accueil');
@@ -831,7 +847,7 @@ export default function App() {
     setVideoStarted(false);
     setRewardAlreadyClicked(false);
     setVideoProgress({ current: 0, duration: 0, isAd: false, paused: true });
-    setHeadlessMode(false);                   // ⬅️ reset headless
+    setHeadlessMode(false);
     setSplitMode(true);
   };
 
@@ -857,7 +873,7 @@ export default function App() {
           </View>
           <View style={styles.headerRightButtons}>
             <Pressable
-              onPress={() => setHeadlessMode(!headlessMode)}
+              onPress={toggleHeadless}
               style={[styles.headlessButton, headlessMode && styles.headlessButtonActive]}
             >
               <Text style={styles.headlessText}>
@@ -872,47 +888,45 @@ export default function App() {
 
         <Text style={styles.assistantStatus} numberOfLines={2}>{assistantStatus}</Text>
 
-        {/* Pane AVISO — masqué en mode headless */}
-        {!headlessMode && (
-          <View style={styles.avisoPane}>
-            <Text style={styles.paneLabel}>AVISO — clic auto</Text>
-            <WebView
-              ref={avisoWebview}
-              source={{ uri: SITES.aviso.url }}
-              javaScriptEnabled
-              domStorageEnabled
-              sharedCookiesEnabled
-              thirdPartyCookiesEnabled
-              setSupportMultipleWindows={false}
-              injectedJavaScriptBeforeContentLoaded={`${cookieScript(savedCookieText, SITES.aviso.url)}\n${avisoOpenHookScript}`}
-              injectedJavaScript={`${avisoTaskCounterScript}\n${avisoTaskAssistantScript}\n${avisoOpenHookScript}\n${avisoAutoClickScript}\n${rewardWatcherScript}`}
-              onMessage={handleWebMessage}
-              onLoadEnd={() => {
-                avisoWebview.current?.injectJavaScript(
-                  `${avisoTaskCounterScript}\n${avisoTaskAssistantScript}\n${avisoOpenHookScript}\n${avisoAutoClickScript}\n${rewardWatcherScript}`
-                );
-              }}
-              onShouldStartLoadWithRequest={(req) => {
-                const u = req.url || '';
-                if (u.includes('/go/') || u.includes('youtube.com') || u.includes('youtu.be')) {
-                  console.log('[AUTO] Aviso → interception nav:', u);
-                  const absolute = u.startsWith('http') ? u : new URL(u, SITES.aviso.url).toString();
-                  setBottomUrl(absolute);
-                  setBottomTitle(`REDIRECTION — ${absolute.substring(0, 60)}…`);
-                  setAssistantStatus(`Chargement pane bas : ${absolute.substring(0, 80)}…`);
-                  return false;
-                }
-                return true;
-              }}
-              onError={() => Alert.alert('Erreur Aviso', 'Aviso n’a pas pu être chargé.')}
-              startInLoadingState
-              renderLoading={() => <View style={styles.center}><ActivityIndicator color="#64d2ff" /></View>}
-            />
-          </View>
-        )}
+        {/* Pane AVISO — toujours monté, caché visuellement en headless */}
+        <View style={[styles.avisoPane, headlessMode && styles.hiddenPane]}>
+          <Text style={styles.paneLabel}>AVISO — clic auto</Text>
+          <WebView
+            ref={avisoWebview}
+            source={{ uri: SITES.aviso.url }}
+            javaScriptEnabled
+            domStorageEnabled
+            sharedCookiesEnabled
+            thirdPartyCookiesEnabled
+            setSupportMultipleWindows={false}
+            injectedJavaScriptBeforeContentLoaded={`${cookieScript(savedCookieText, SITES.aviso.url)}\n${avisoOpenHookScript}`}
+            injectedJavaScript={`${avisoTaskCounterScript}\n${avisoTaskAssistantScript}\n${avisoOpenHookScript}\n${avisoAutoClickScript}\n${rewardWatcherScript}`}
+            onMessage={handleWebMessage}
+            onLoadEnd={() => {
+              avisoWebview.current?.injectJavaScript(
+                `${avisoTaskCounterScript}\n${avisoTaskAssistantScript}\n${avisoOpenHookScript}\n${avisoAutoClickScript}\n${rewardWatcherScript}`
+              );
+            }}
+            onShouldStartLoadWithRequest={(req) => {
+              const u = req.url || '';
+              if (u.includes('/go/') || u.includes('youtube.com') || u.includes('youtu.be')) {
+                console.log('[AUTO] Aviso → interception nav:', u);
+                const absolute = u.startsWith('http') ? u : new URL(u, SITES.aviso.url).toString();
+                setBottomUrl(absolute);
+                setBottomTitle(`REDIRECTION — ${absolute.substring(0, 60)}…`);
+                setAssistantStatus(`Chargement pane bas : ${absolute.substring(0, 80)}…`);
+                return false;
+              }
+              return true;
+            }}
+            onError={() => Alert.alert('Erreur Aviso', 'Aviso n’a pas pu être chargé.')}
+            startInLoadingState
+            renderLoading={() => <View style={styles.center}><ActivityIndicator color="#64d2ff" /></View>}
+          />
+        </View>
 
-        {/* Pane BAS — prend tout l'espace en headless */}
-        <View style={headlessMode ? styles.bottomPaneFull : styles.bottomPane}>
+        {/* Pane BAS */}
+        <View style={styles.bottomPane}>
           <View style={styles.bottomHeader}>
             <Text style={styles.paneLabel} numberOfLines={1}>{bottomTitle}</Text>
             {currentTaskTime > 0 && videoStarted && (
@@ -1055,8 +1069,8 @@ const styles = StyleSheet.create({
   headlessText: { color: '#64d2ff', fontSize: 14, fontWeight: '700' },
   assistantStatus: { color: '#9ba8be', fontSize: 12, paddingHorizontal: 14, paddingVertical: 6, backgroundColor: '#11192b' },
   avisoPane: { flex: 1.1, minHeight: 0, borderBottomWidth: 2, borderBottomColor: '#263452' },
-  bottomPane: { flex: 0.9, minHeight: 0 },
-  bottomPaneFull: { flex: 1, minHeight: 0 },
+  hiddenPane: { display: 'none' },
+  bottomPane: { flex: 1, minHeight: 0 },
   bottomHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: '#11192b' },
   paneLabel: { color: '#9ba8be', backgroundColor: '#11192b', paddingHorizontal: 10, paddingVertical: 5, fontSize: 11, fontWeight: '700', flex: 1 },
   videoTimer: {
