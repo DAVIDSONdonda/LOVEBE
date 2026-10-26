@@ -533,15 +533,17 @@ export default function App() {
   const avisoWebview = useRef(null);
   const bottomWebview = useRef(null);
   const noTaskReloadTimer = useRef(null);
+  const pendingReload = useRef(false);
 
   // ==========================================================================
-  // GESTION DU RELOAD PÉRIODIQUE (aucune tâche)
+  // GESTION DU RELOAD PÉRIODIQUE (aucune tâche) — CYCLE INFINI
   // ==========================================================================
   const cancelNoTaskReload = () => {
     if (noTaskReloadTimer.current) {
       clearTimeout(noTaskReloadTimer.current);
       noTaskReloadTimer.current = null;
     }
+    pendingReload.current = false;
   };
 
   const scheduleNoTaskReload = () => {
@@ -554,6 +556,7 @@ export default function App() {
       if (!automationPaused) {
         console.log('[AUTO] Reload Aviso (aucune tâche)');
         setAssistantStatus('🔄 Rechargement d\'Aviso…');
+        pendingReload.current = true;
         avisoWebview.current?.reload();
       }
     }, delay);
@@ -593,13 +596,13 @@ export default function App() {
   };
 
   // ==========================================================================
-  // HANDLE CLAIM ALL RESULT — sans reload
+  // HANDLE CLAIM ALL RESULT — sans reload → programme le reload 20-30s
   // ==========================================================================
   const handleClaimAllResult = (message) => {
     if (message.status === 'clicked') {
       setAssistantStatus(`💰 ${message.count} récompense(s) réclamée(s) · vérification…`);
     } else if (message.status === 'done') {
-      setAssistantStatus(`✅ Aucune récompense restante · tâche suivante…`);
+      setAssistantStatus(`✅ Aucune récompense restante · recherche tâche suivante…`);
 
       setCurrentTaskTime(0);
       setCurrentTaskId(null);
@@ -609,9 +612,9 @@ export default function App() {
       setVideoProgress({ current: 0, duration: 0, isAd: false, paused: true });
       setLastClickedTask(null);
 
+      // Relance immédiate de __avisoAutoClick() (pas de reload si tâches dans le DOM)
       setTimeout(() => {
         if (!automationPaused) {
-          setAssistantStatus('Recherche de la tâche suivante…');
           const script = `${avisoOpenHookScript}\n${avisoAutoClickScript}\nwindow.__avisoAutoClick();true;`;
           avisoWebview.current?.injectJavaScript(script);
         }
@@ -626,8 +629,8 @@ export default function App() {
         setRewardAlreadyClicked(false);
         setVideoProgress({ current: 0, duration: 0, isAd: false, paused: true });
         if (!automationPaused) {
-          const script = `${avisoOpenHookScript}\n${avisoAutoClickScript}\nwindow.__avisoAutoClick();true;`;
-          avisoWebview.current?.injectJavaScript(script);
+          // En cas d'erreur, on programme le reload 20-30s (comme si aucune tâche)
+          scheduleNoTaskReload();
         }
       }, 2000);
     }
@@ -654,7 +657,8 @@ export default function App() {
 
       if (message.type === 'autoClickResult') {
         if (message.status === 'clicked') {
-          cancelNoTaskReload();                   // ⬅️ annule reload en attente
+          cancelNoTaskReload();
+          pendingReload.current = false;
           setLastClickedTask({ id: message.id, time: message.time });
           setCurrentTaskTime(message.time);
           setCurrentTaskId(message.id);
@@ -664,9 +668,12 @@ export default function App() {
           setVideoProgress({ current: 0, duration: 0, isAd: false, paused: true });
           setAssistantStatus(`Tâche ${message.id} cliquée (${message.time}s) · attente de la redirection…`);
         } else if (message.status === 'empty') {
-          scheduleNoTaskReload();                 // ⬅️ programme le reload 20-30s
+          // ⬇️ Aucune tâche → programme le reload 20-30s
+          scheduleNoTaskReload();
         } else if (message.status === 'error') {
           setAssistantStatus(`Erreur clic : ${message.message}`);
+          // En cas d'erreur, on programme aussi un reload 20-30s
+          scheduleNoTaskReload();
         }
       }
 
@@ -772,9 +779,8 @@ export default function App() {
           setRewardAlreadyClicked(false);
           setVideoProgress({ current: 0, duration: 0, isAd: false, paused: true });
           if (!automationPaused) {
-            setAssistantStatus('Recherche de la tâche suivante…');
-            const script = `${avisoOpenHookScript}\n${avisoAutoClickScript}\nwindow.__avisoAutoClick();true;`;
-            avisoWebview.current?.injectJavaScript(script);
+            // ⬇️ Programme le reload 20-30s (comme si aucune tâche)
+            scheduleNoTaskReload();
           }
         }, 2000);
       }
@@ -791,30 +797,26 @@ export default function App() {
       Alert.alert('Tâche en cours', 'Une vidéo est déjà en cours de visionnage. Attendez la fin.');
       return;
     }
+    cancelNoTaskReload();
     setAutomationPaused(false);
     setAssistantStatus('Recherche de la tâche la plus courte…');
     const script = `${avisoOpenHookScript}\n${avisoAutoClickScript}\nwindow.__avisoAutoClick();true;`;
     avisoWebview.current?.injectJavaScript(script);
   };
 
-  // ⬇️ NOUVEAU : toggle pause / reprendre
   const togglePause = () => {
     if (automationPaused) {
-      // Reprise
       setAutomationPaused(false);
       setAssistantStatus('▶️ Reprise de l\'automatisation…');
       setTimeout(() => {
-        // Si une tâche est déjà en cours, le minuteur continue normalement
         if (currentTaskTime > 0 && !videoWatchedEnough) {
           console.log('[PAUSE] Reprise avec tâche en cours, minuteur continue');
           return;
         }
-        // Sinon, relance le cycle
         const script = `${avisoOpenHookScript}\n${avisoAutoClickScript}\nwindow.__avisoAutoClick();true;`;
         avisoWebview.current?.injectJavaScript(script);
       }, 1000);
     } else {
-      // Pause
       setAutomationPaused(true);
       cancelNoTaskReload();
       setAssistantStatus('⏸️ Automatisation en pause');
@@ -964,6 +966,17 @@ export default function App() {
               avisoWebview.current?.injectJavaScript(
                 `${avisoTaskCounterScript}\n${avisoTaskAssistantScript}\n${avisoOpenHookScript}\n${avisoAutoClickScript}\n${rewardWatcherScript}`
               );
+              // ⬇️ Si on vient de recharger à cause d'une absence de tâche, relance
+              if (pendingReload.current) {
+                pendingReload.current = false;
+                if (!automationPaused) {
+                  setTimeout(() => {
+                    setAssistantStatus('Recherche de la tâche après rechargement…');
+                    const script = `${avisoOpenHookScript}\n${avisoAutoClickScript}\nwindow.__avisoAutoClick();true;`;
+                    avisoWebview.current?.injectJavaScript(script);
+                  }, 800);
+                }
+              }
             }}
             onShouldStartLoadWithRequest={(req) => {
               const u = req.url || '';
