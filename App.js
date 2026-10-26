@@ -114,7 +114,7 @@ function cookieScript(raw, url) {
 }
 
 // ============================================================================
-// HELPERS YOUTUBE (uniquement pour affichage dans le statut)
+// HELPERS YOUTUBE
 // ============================================================================
 
 function extractVideoId(url) {
@@ -141,7 +141,6 @@ function extractVideoId(url) {
 // SCRIPTS INJECTÉS
 // ============================================================================
 
-// Compteur de tâches
 const avisoTaskCounterScript = `
 (function() {
   if (window.__avisoTaskCounterInstalled) {
@@ -169,7 +168,6 @@ const avisoTaskCounterScript = `
 true;
 `;
 
-// Assistant manuel (conservé)
 const avisoTaskAssistantScript = `
 (function() {
   if (window.__avisoAssistantInstalled) {
@@ -231,7 +229,6 @@ const avisoTaskAssistantScript = `
 true;
 `;
 
-// Hook window.open : capture TOUTE URL pertinente (n'importe quelle redirection)
 const avisoOpenHookScript = `
 (function() {
   if (window.__avisoOpenHooked) return true;
@@ -254,7 +251,6 @@ const avisoOpenHookScript = `
     } catch(e) {}
   }
 
-  // --- Cas 1 : window.open ---
   var originalOpen = window.open;
   window.open = function(url, target, features) {
     if (isRelevant(url)) {
@@ -264,7 +260,6 @@ const avisoOpenHookScript = `
     return originalOpen.apply(window, arguments);
   };
 
-  // --- Cas 2 : clic sur <a> pertinent ---
   document.addEventListener('click', function(ev) {
     var el = ev.target;
     while (el && el !== document.body) {
@@ -278,7 +273,6 @@ const avisoOpenHookScript = `
     }
   }, true);
 
-  // --- Cas 3 : form submit pertinent ---
   document.addEventListener('submit', function(ev) {
     var action = ev.target && ev.target.action;
     if (isRelevant(action)) {
@@ -293,7 +287,6 @@ const avisoOpenHookScript = `
 true;
 `;
 
-// Clic auto sur la tâche la plus courte
 const avisoAutoClickScript = `
 (function() {
   function extractTime(taskElement) {
@@ -365,7 +358,6 @@ const avisoAutoClickScript = `
         total: withTime.length
       });
 
-      // Clic (déclenche le hook window.open)
       chosen.el.click();
     } catch(e) {
       send({ type: 'autoClickResult', status: 'error', message: e.message });
@@ -377,7 +369,53 @@ const avisoAutoClickScript = `
 true;
 `;
 
-// Script injecté dans le pane bas pour surveiller l'arrivée sur YouTube
+// Watcher des récompenses sur Aviso (injecté dans le pane Aviso)
+const rewardWatcherScript = `
+(function() {
+  if (window.__rewardWatcherInstalled) return true;
+  window.__rewardWatcherInstalled = true;
+
+  function send(message) {
+    window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify(message));
+  }
+
+  var lastReportedId = null;
+
+  setInterval(function() {
+    try {
+      var confirmBtns = document.querySelectorAll('span[id^="ads_btn_confirm_"]');
+      var visible = Array.from(confirmBtns).filter(function(b) {
+        return b.offsetParent !== null;
+      });
+      if (visible.length > 0) {
+        var id = visible[0].id.replace('ads_btn_confirm_', '');
+        if (id !== lastReportedId) {
+          lastReportedId = id;
+          send({ type: 'rewardAvailable', id: id });
+        }
+      } else {
+        lastReportedId = null;
+      }
+
+      var bodyText = (document.body.innerText || '').toLowerCase();
+      if (bodyText.indexOf('задача выполнена') !== -1 ||
+          bodyText.indexOf('начислено') !== -1 ||
+          bodyText.indexOf('успешно') !== -1) {
+        send({ type: 'rewardSuccess' });
+      }
+
+      if (bodyText.indexOf('площадка не найдена') !== -1) {
+        send({ type: 'taskNotFound' });
+      }
+    } catch(e) {}
+  }, 2000);
+
+  true;
+})();
+true;
+`;
+
+// Watcher de navigation du pane bas
 const youtubeWatcherScript = `
 (function() {
   if (window.__ytWatcherInstalled) return true;
@@ -386,6 +424,44 @@ const youtubeWatcherScript = `
     window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify(message));
   }
   send({ type: 'bottomNav', url: window.location.href, stage: 'loaded' });
+  true;
+})();
+true;
+`;
+
+// Monitoring vidéo dans le pane bas (timer + pubs)
+const videoMonitorScript = `
+(function() {
+  if (window.__videoMonitorInstalled) return true;
+  window.__videoMonitorInstalled = true;
+
+  function send(message) {
+    window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify(message));
+  }
+
+  setInterval(function() {
+    try {
+      var video = document.querySelector('video');
+      var player = document.querySelector('#movie_player');
+      if (!video || !player) {
+        send({ type: 'videoProgress', found: false });
+        return;
+      }
+      var isAd = player.classList.contains('ad-showing') || player.classList.contains('ad-interrupting');
+      send({
+        type: 'videoProgress',
+        found: true,
+        current: video.currentTime || 0,
+        duration: video.duration || 0,
+        paused: video.paused,
+        ended: video.ended,
+        isAd: isAd
+      });
+    } catch(e) {
+      send({ type: 'videoProgress', found: false, error: e.message });
+    }
+  }, 1000);
+
   true;
 })();
 true;
@@ -407,6 +483,15 @@ export default function App() {
   const [bottomUrl, setBottomUrl] = useState(SITES.youtube.url);
   const [bottomTitle, setBottomTitle] = useState('YOUTUBE — accueil');
   const [lastClickedTask, setLastClickedTask] = useState(null);
+
+  // ---- États du minuteur et récompense ----
+  const [currentTaskTime, setCurrentTaskTime] = useState(0);
+  const [currentTaskId, setCurrentTaskId] = useState(null);
+  const [videoProgress, setVideoProgress] = useState({ current: 0, duration: 0, isAd: false });
+  const [watchDelay] = useState(10); // secondes après visionnage (fixe pour prototype)
+  const [videoWatchedEnough, setVideoWatchedEnough] = useState(false);
+  const [successCount, setSuccessCount] = useState(0);
+
   const avisoWebview = useRef(null);
   const bottomWebview = useRef(null);
 
@@ -423,47 +508,54 @@ export default function App() {
 
   const parsedCount = useMemo(() => cookiePairs(cookieText).length, [cookieText]);
 
-  const saveCookies = async () => {
-    if (!cookieText.trim()) {
-      Alert.alert('Cookies manquants', 'Collez d’abord le texte des cookies.');
-      return;
+  // ==========================================================================
+  // WATCHDOG vidéo : reset si pub détectée
+  // ==========================================================================
+  useEffect(() => {
+    if (videoProgress.isAd && currentTaskTime > 0) {
+      // La pub "remet à zéro" le compteur de visionnage (comme dans Electron)
+      setAssistantStatus(`⏭️ Publicité en cours · le compteur reprendra après`);
     }
-    if (!parsedCount) {
-      Alert.alert('Format non reconnu', 'Utilisez par exemple : nom=valeur; autre=valeur, ou un tableau JSON de cookies.');
-      return;
-    }
-    await SecureStore.setItemAsync(COOKIE_KEY, cookieText);
-    setSavedCookieText(cookieText);
-    setSaved(true);
-    Alert.alert('Cookies enregistrés', `${parsedCount} cookie(s) seront utilisés.`);
-  };
+  }, [videoProgress.isAd, currentTaskTime]);
 
-  const openSite = async () => {
-    const stored = await SecureStore.getItemAsync(COOKIE_KEY);
-    if (stored) {
-      setCookieText(stored);
-      setSavedCookieText(stored);
-      setSaved(true);
-    } else {
-      Alert.alert('Cookies non enregistrés', 'Enregistrez d’abord les cookies pour les utiliser sur Aviso.');
-      return;
-    }
-    let restored = false;
-    try {
-      restored = await restoreNativeCookies(stored, SITES.aviso.url);
-    } catch (_) {
-      restored = false;
-    }
-    if (!restored && cookiePairs(stored).length === 0) {
-      Alert.alert('Cookies non reconnus', 'Collez le fichier JSON complet exporté par Electron.');
-      return;
-    }
-    setAvisoTaskCount(null);
-    setAutomationPaused(true);
-    setBottomUrl(SITES.youtube.url);
-    setBottomTitle('YOUTUBE — accueil');
-    setLastClickedTask(null);
-    setSplitMode(true);
+  // ==========================================================================
+  // HANDLE VIDEO WATCHED ENOUGH
+  // ==========================================================================
+  const handleVideoWatchedEnough = () => {
+    if (videoWatchedEnough || !currentTaskId) return;
+    setVideoWatchedEnough(true);
+    setAssistantStatus(`Vidéo visionnée (${currentTaskTime}s) · attente ${watchDelay}s…`);
+
+    setTimeout(() => {
+      setAssistantStatus(`Demande de validation de la récompense…`);
+      avisoWebview.current?.injectJavaScript(`
+        (function() {
+          try {
+            var btn = document.getElementById('ads_btn_confirm_${currentTaskId}');
+            if (btn && btn.offsetParent !== null) {
+              btn.click();
+              window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify({
+                type: 'rewardClicked',
+                id: '${currentTaskId}'
+              }));
+            } else {
+              window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify({
+                type: 'rewardNotFound',
+                id: '${currentTaskId}'
+              }));
+            }
+          } catch(e) {
+            window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify({
+              type: 'rewardNotFound',
+              id: '${currentTaskId}',
+              error: e.message
+            }));
+          }
+          true;
+        })();
+        true;
+      `);
+    }, watchDelay * 1000);
   };
 
   // ==========================================================================
@@ -473,11 +565,12 @@ export default function App() {
     try {
       const message = JSON.parse(event.nativeEvent.data);
 
-      // ---- Messages depuis le pane AVISO ----
+      // ---- Aviso : compteur de tâches ----
       if (message.type === 'avisoTaskCount') {
         setAvisoTaskCount(Number(message.count) || 0);
       }
 
+      // ---- Aviso : assistant manuel ----
       if (message.type === 'avisoAssistant') {
         if (message.status === 'ready') {
           setAssistantStatus(`Tâche ${message.id} prête · ${message.seconds >= 999 ? 'durée inconnue' : `${message.seconds}s`} · ${message.total} disponible(s)`);
@@ -488,9 +581,14 @@ export default function App() {
         }
       }
 
+      // ---- Aviso : clic auto ----
       if (message.type === 'autoClickResult') {
         if (message.status === 'clicked') {
           setLastClickedTask({ id: message.id, time: message.time });
+          setCurrentTaskTime(message.time);
+          setCurrentTaskId(message.id);
+          setVideoWatchedEnough(false);
+          setVideoProgress({ current: 0, duration: 0, isAd: false });
           setAssistantStatus(`Tâche ${message.id} cliquée (${message.time}s) · attente de la redirection…`);
         } else if (message.status === 'empty') {
           setAssistantStatus('Aucune tâche disponible');
@@ -499,20 +597,18 @@ export default function App() {
         }
       }
 
-      // ---- Capture de la redirection depuis AVISO ----
+      // ---- Aviso : capture de redirection ----
       if (message.type === 'redirectCaptured') {
         console.log('[AUTO] Redirect capturé:', message.source, message.url);
         const absolute = message.url.startsWith('http')
           ? message.url
           : new URL(message.url, SITES.aviso.url).toString();
-
-        // ⚠️ On envoie l'URL BRUTE au pane bas, sans résolution
         setBottomUrl(absolute);
         setBottomTitle(`REDIRECTION — ${absolute.substring(0, 60)}…`);
         setAssistantStatus(`Chargement pane bas : ${absolute.substring(0, 80)}…`);
       }
 
-      // ---- Messages depuis le pane BAS (navigation) ----
+      // ---- Pane bas : navigation ----
       if (message.type === 'bottomNav') {
         console.log('[BOTTOM] Navigation:', message.url);
         const u = message.url || '';
@@ -522,10 +618,107 @@ export default function App() {
           setAssistantStatus(`YouTube chargé · ${vid}`);
         } else if (u.includes('aviso.bz')) {
           setBottomTitle(`AVISO /go — ${u.substring(0, 60)}…`);
-          setAssistantStatus(`Page intermédiaire Aviso chargée`);
+          setAssistantStatus(`Page intermédiaire Aviso`);
         } else {
           setBottomTitle(`PAGE — ${u.substring(0, 60)}…`);
         }
+      }
+
+      // ---- Pane bas : progression vidéo ----
+      if (message.type === 'videoProgress') {
+        if (!message.found) {
+          setVideoProgress({ current: 0, duration: 0, isAd: false });
+          return;
+        }
+
+        setVideoProgress({
+          current: message.current,
+          duration: message.duration,
+          isAd: message.isAd
+        });
+
+        // Si pub → on ne compte pas
+        if (message.isAd) return;
+
+        // Vérifie si assez regardé
+        if (currentTaskTime > 0 && !videoWatchedEnough) {
+          const effective = (message.duration > 0 && message.duration < currentTaskTime)
+            ? message.duration
+            : currentTaskTime;
+
+          const remaining = Math.max(0, effective - message.current);
+          if (remaining > 0.5) {
+            setAssistantStatus(`Visionnage : ${message.current.toFixed(1)}s / ${effective.toFixed(0)}s · reste ${remaining.toFixed(0)}s`);
+          }
+
+          if (message.current >= effective) {
+            handleVideoWatchedEnough();
+          } else if (message.ended) {
+            handleVideoWatchedEnough();
+          }
+        }
+      }
+
+      // ---- Aviso : récompense disponible ----
+      if (message.type === 'rewardAvailable') {
+        console.log('[AUTO] Reward disponible:', message.id);
+        // Clic auto si on a déjà fini le visionnage
+        if (videoWatchedEnough) {
+          avisoWebview.current?.injectJavaScript(`
+            var btn = document.getElementById('ads_btn_confirm_${message.id}');
+            if (btn && btn.offsetParent !== null) {
+              btn.click();
+              window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify({
+                type: 'rewardClicked',
+                id: '${message.id}'
+              }));
+            }
+            true;
+          `);
+        } else {
+          setAssistantStatus(`Bouton de validation détecté · visionnage en cours…`);
+        }
+      }
+
+      // ---- Récompense cliquée ----
+      if (message.type === 'rewardClicked') {
+        setAssistantStatus(`Récompense validée pour la tâche ${message.id} · vérification…`);
+      }
+
+      // ---- Récompense confirmée ----
+      if (message.type === 'rewardSuccess') {
+        const newCount = successCount + 1;
+        setSuccessCount(newCount);
+        setAssistantStatus(`✅ Récompense confirmée ! Total : ${newCount}`);
+        setCurrentTaskTime(0);
+        setCurrentTaskId(null);
+        setVideoWatchedEnough(false);
+        setVideoProgress({ current: 0, duration: 0, isAd: false });
+      }
+
+      // ---- Récompense non trouvée ----
+      if (message.type === 'rewardNotFound') {
+        setAssistantStatus(`⚠️ Bouton de validation non trouvé · réessai dans 5s…`);
+        setTimeout(() => {
+          if (currentTaskId) {
+            avisoWebview.current?.injectJavaScript(`
+              try {
+                var btn = document.getElementById('ads_btn_confirm_${currentTaskId}');
+                if (btn && btn.offsetParent !== null) btn.click();
+              } catch(e) {}
+              true;
+            `);
+          }
+        }, 5000);
+      }
+
+      // ---- Tâche introuvable ----
+      if (message.type === 'taskNotFound') {
+        setAssistantStatus(`❌ Tâche ${currentTaskId} introuvable · passage à la suivante`);
+        setCurrentTaskTime(0);
+        setCurrentTaskId(null);
+        setVideoWatchedEnough(false);
+        setVideoProgress({ current: 0, duration: 0, isAd: false });
       }
     } catch (err) {
       console.log('[AUTO] Erreur handler message:', err.message);
@@ -536,6 +729,10 @@ export default function App() {
   // ACTIONS UI
   // ==========================================================================
   const runAutoClick = () => {
+    if (currentTaskTime > 0 && !videoWatchedEnough) {
+      Alert.alert('Tâche en cours', 'Une vidéo est déjà en cours de visionnage. Attendez la fin.');
+      return;
+    }
     setAutomationPaused(false);
     setAssistantStatus('Recherche de la tâche la plus courte…');
     const script = `${avisoOpenHookScript}\n${avisoAutoClickScript}\nwindow.__avisoAutoClick();true;`;
@@ -547,6 +744,10 @@ export default function App() {
     setBottomTitle('YOUTUBE — accueil');
     setAssistantStatus('Prêt');
     setLastClickedTask(null);
+    setCurrentTaskTime(0);
+    setCurrentTaskId(null);
+    setVideoWatchedEnough(false);
+    setVideoProgress({ current: 0, duration: 0, isAd: false });
   };
 
   // ==========================================================================
@@ -590,16 +791,15 @@ export default function App() {
             thirdPartyCookiesEnabled
             setSupportMultipleWindows={false}
             injectedJavaScriptBeforeContentLoaded={`${cookieScript(savedCookieText, SITES.aviso.url)}\n${avisoOpenHookScript}`}
-            injectedJavaScript={`${avisoTaskCounterScript}\n${avisoTaskAssistantScript}\n${avisoOpenHookScript}\n${avisoAutoClickScript}`}
+            injectedJavaScript={`${avisoTaskCounterScript}\n${avisoTaskAssistantScript}\n${avisoOpenHookScript}\n${avisoAutoClickScript}\n${rewardWatcherScript}`}
             onMessage={handleWebMessage}
             onLoadEnd={() => {
               avisoWebview.current?.injectJavaScript(
-                `${avisoTaskCounterScript}\n${avisoTaskAssistantScript}\n${avisoOpenHookScript}\n${avisoAutoClickScript}`
+                `${avisoTaskCounterScript}\n${avisoTaskAssistantScript}\n${avisoOpenHookScript}\n${avisoAutoClickScript}\n${rewardWatcherScript}`
               );
             }}
             onShouldStartLoadWithRequest={(req) => {
               const u = req.url || '';
-              // Bloque toute navigation hors d'Aviso : redirige vers le pane bas
               if (u.includes('/go/') || u.includes('youtube.com') || u.includes('youtu.be')) {
                 console.log('[AUTO] Aviso → interception nav:', u);
                 const absolute = u.startsWith('http') ? u : new URL(u, SITES.aviso.url).toString();
@@ -616,10 +816,17 @@ export default function App() {
           />
         </View>
 
-        {/* Pane BAS — charge TOUTE URL brute */}
+        {/* Pane BAS */}
         <View style={styles.bottomPane}>
           <View style={styles.bottomHeader}>
             <Text style={styles.paneLabel} numberOfLines={1}>{bottomTitle}</Text>
+            {currentTaskTime > 0 && (
+              <Text style={styles.videoTimer}>
+                {videoProgress.isAd
+                  ? '⏭️ PUB'
+                  : `${Math.min(videoProgress.current, currentTaskTime).toFixed(0)}/${currentTaskTime}s`}
+              </Text>
+            )}
             <Pressable onPress={resetBottom} style={styles.resetButton}>
               <Text style={styles.resetText}>↺ Reset</Text>
             </Pressable>
@@ -634,11 +841,10 @@ export default function App() {
             thirdPartyCookiesEnabled
             setSupportMultipleWindows={false}
             injectedJavaScriptBeforeContentLoaded={youtubeWatcherScript}
-            injectedJavaScript={youtubeWatcherScript}
+            injectedJavaScript={`${youtubeWatcherScript}\n${videoMonitorScript}`}
             onMessage={handleWebMessage}
             onLoadEnd={() => {
-              // Réinjecte pour tracker la navigation
-              bottomWebview.current?.injectJavaScript(youtubeWatcherScript);
+              bottomWebview.current?.injectJavaScript(`${youtubeWatcherScript}\n${videoMonitorScript}`);
             }}
             onNavigationStateChange={(navState) => {
               if (!navState.loading && navState.url) {
@@ -654,10 +860,7 @@ export default function App() {
                 }
               }
             }}
-            onShouldStartLoadWithRequest={(req) => {
-              // LAISSE TOUT PASSER (pages intermédiaires, redirections, YouTube...)
-              return true;
-            }}
+            onShouldStartLoadWithRequest={() => true}
             onError={() => Alert.alert('Erreur pane bas', 'Chargement impossible.')}
             startInLoadingState
             renderLoading={() => <View style={styles.center}><ActivityIndicator color="#ff5c7a" /></View>}
@@ -719,6 +922,56 @@ export default function App() {
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
+
+  // ==========================================================================
+  // FONCTIONS ACCUEIL (déclarées après pour clarté mais hoist via function)
+  // ==========================================================================
+  async function saveCookies() {
+    if (!cookieText.trim()) {
+      Alert.alert('Cookies manquants', 'Collez d’abord le texte des cookies.');
+      return;
+    }
+    if (!parsedCount) {
+      Alert.alert('Format non reconnu', 'Utilisez par exemple : nom=valeur; autre=valeur, ou un tableau JSON de cookies.');
+      return;
+    }
+    await SecureStore.setItemAsync(COOKIE_KEY, cookieText);
+    setSavedCookieText(cookieText);
+    setSaved(true);
+    Alert.alert('Cookies enregistrés', `${parsedCount} cookie(s) seront utilisés.`);
+  }
+
+  async function openSite() {
+    const stored = await SecureStore.getItemAsync(COOKIE_KEY);
+    if (stored) {
+      setCookieText(stored);
+      setSavedCookieText(stored);
+      setSaved(true);
+    } else {
+      Alert.alert('Cookies non enregistrés', 'Enregistrez d’abord les cookies pour les utiliser sur Aviso.');
+      return;
+    }
+    let restored = false;
+    try {
+      restored = await restoreNativeCookies(stored, SITES.aviso.url);
+    } catch (_) {
+      restored = false;
+    }
+    if (!restored && cookiePairs(stored).length === 0) {
+      Alert.alert('Cookies non reconnus', 'Collez le fichier JSON complet exporté par Electron.');
+      return;
+    }
+    setAvisoTaskCount(null);
+    setAutomationPaused(true);
+    setBottomUrl(SITES.youtube.url);
+    setBottomTitle('YOUTUBE — accueil');
+    setLastClickedTask(null);
+    setCurrentTaskTime(0);
+    setCurrentTaskId(null);
+    setVideoWatchedEnough(false);
+    setVideoProgress({ current: 0, duration: 0, isAd: false });
+    setSplitMode(true);
+  }
 }
 
 // ============================================================================
@@ -760,6 +1013,16 @@ const styles = StyleSheet.create({
   bottomPane: { flex: 0.9, minHeight: 0 },
   bottomHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: '#11192b' },
   paneLabel: { color: '#9ba8be', backgroundColor: '#11192b', paddingHorizontal: 10, paddingVertical: 5, fontSize: 11, fontWeight: '700', flex: 1 },
+  videoTimer: {
+    color: '#ff5c7a',
+    fontSize: 11,
+    fontWeight: '800',
+    marginHorizontal: 8,
+    backgroundColor: '#2a1520',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
+  },
   resetButton: { paddingHorizontal: 10, paddingVertical: 4 },
   resetText: { color: '#64d2ff', fontSize: 11, fontWeight: '700' },
 });
