@@ -1,0 +1,19 @@
+{
+  "expo": {
+    "name": "Aviso YouTube Launcher",
+    "slug": "aviso-youtube-launcher",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "newArchEnabled": false,
+    "android": {
+      "package": "com.mandresy.aviso.youtubelauncher",
+      "versionCode": 1,
+      "permissions": ["INTERNET"]
+    },
+    "plugins": ["expo-secure-store"],
+    "extra": {
+      "buildProfile": "preview"
+    }
+  }
+}
