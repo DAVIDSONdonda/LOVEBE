@@ -23,7 +23,7 @@ const SITES = {
 };
 
 // ============================================================================
-// HELPERS COOKIES (inchangés)
+// HELPERS COOKIES
 // ============================================================================
 
 function cookiePairs(raw) {
@@ -114,10 +114,9 @@ function cookieScript(raw, url) {
 }
 
 // ============================================================================
-// HELPERS YOUTUBE (nouveaux)
+// HELPERS YOUTUBE (uniquement pour affichage dans le statut)
 // ============================================================================
 
-// Extrait l'ID vidéo YouTube depuis une URL
 function extractVideoId(url) {
   if (!url) return null;
   try {
@@ -133,51 +132,16 @@ function extractVideoId(url) {
       const m = u.pathname.match(/\/embed\/([^/?]+)/);
       if (m && m[1]) return m[1];
     }
-    if (u.hostname.includes('google.com') && u.searchParams.has('url')) {
-      return extractVideoId(u.searchParams.get('url'));
-    }
   } catch (_) {}
   const m = url.match(/(?:v=|youtu\.be\/|embed\/)([a-zA-Z0-9_-]{11})/);
   return m ? m[1] : null;
-}
-
-// Résout une URL Aviso /go/ en URL YouTube finale
-function resolveAvisoGoUrl(url, baseUrl = 'https://aviso.bz') {
-  if (!url) return null;
-
-  // Si déjà YouTube → ok
-  if (url.includes('youtube.com') || url.includes('youtu.be')) {
-    // Clean possible encodage double
-    try {
-      const decoded = decodeURIComponent(url);
-      if (decoded.includes('youtube.com') || decoded.includes('youtu.be')) return decoded;
-    } catch (_) {}
-    return url;
-  }
-
-  // Chercher go_url= dans les query params
-  try {
-    const fullUrl = url.startsWith('http') ? url : new URL(url, baseUrl).toString();
-    const u = new URL(fullUrl);
-    const goUrl = u.searchParams.get('go_url');
-    if (goUrl) {
-      try {
-        const decoded = decodeURIComponent(goUrl);
-        if (decoded.includes('youtube.com') || decoded.includes('youtu.be')) return decoded;
-        return decoded;
-      } catch (_) {
-        return goUrl;
-      }
-    }
-  } catch (_) {}
-  return null;
 }
 
 // ============================================================================
 // SCRIPTS INJECTÉS
 // ============================================================================
 
-// Compteur de tâches (inchangé)
+// Compteur de tâches
 const avisoTaskCounterScript = `
 (function() {
   if (window.__avisoTaskCounterInstalled) {
@@ -205,7 +169,7 @@ const avisoTaskCounterScript = `
 true;
 `;
 
-// Assistant manuel (inchangé, conservé pour compatibilité)
+// Assistant manuel (conservé)
 const avisoTaskAssistantScript = `
 (function() {
   if (window.__avisoAssistantInstalled) {
@@ -267,16 +231,23 @@ const avisoTaskAssistantScript = `
 true;
 `;
 
-// Hook window.open : capture les redirections YouTube (injecté AVANT chargement)
+// Hook window.open : capture TOUTE URL pertinente (n'importe quelle redirection)
 const avisoOpenHookScript = `
 (function() {
   if (window.__avisoOpenHooked) return true;
   window.__avisoOpenHooked = true;
 
+  function isRelevant(url) {
+    if (!url) return false;
+    return url.indexOf('/go/') !== -1
+        || url.indexOf('youtube.com') !== -1
+        || url.indexOf('youtu.be') !== -1;
+  }
+
   function report(url, source) {
     try {
       window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify({
-        type: 'youtubeRedirect',
+        type: 'redirectCaptured',
         url: url,
         source: source
       }));
@@ -286,40 +257,31 @@ const avisoOpenHookScript = `
   // --- Cas 1 : window.open ---
   var originalOpen = window.open;
   window.open = function(url, target, features) {
-    if (url && (url.indexOf('youtube.com') !== -1 || url.indexOf('youtu.be') !== -1 || url.indexOf('/go/') !== -1)) {
+    if (isRelevant(url)) {
       report(url, 'window.open');
       return null;
     }
     return originalOpen.apply(window, arguments);
   };
 
-  // --- Cas 2 : clic sur <a> vers YouTube ou /go/ ---
+  // --- Cas 2 : clic sur <a> pertinent ---
   document.addEventListener('click', function(ev) {
     var el = ev.target;
     while (el && el !== document.body) {
-      if (el.tagName === 'A' && el.href) {
-        var h = el.href;
-        if (h.indexOf('youtube.com') !== -1 || h.indexOf('youtu.be') !== -1) {
-          report(h, 'a-click');
-          ev.preventDefault();
-          ev.stopPropagation();
-          return false;
-        }
-        if (h.indexOf('/go/') !== -1 && h.indexOf('aviso.bz') !== -1) {
-          report(h, 'a-click-go');
-          ev.preventDefault();
-          ev.stopPropagation();
-          return false;
-        }
+      if (el.tagName === 'A' && el.href && isRelevant(el.href)) {
+        report(el.href, 'a-click');
+        ev.preventDefault();
+        ev.stopPropagation();
+        return false;
       }
       el = el.parentElement;
     }
   }, true);
 
-  // --- Cas 3 : form submit ---
+  // --- Cas 3 : form submit pertinent ---
   document.addEventListener('submit', function(ev) {
     var action = ev.target && ev.target.action;
-    if (action && (action.indexOf('youtube.com') !== -1 || action.indexOf('/go/') !== -1)) {
+    if (isRelevant(action)) {
       report(action, 'form-submit');
       ev.preventDefault();
       return false;
@@ -331,7 +293,7 @@ const avisoOpenHookScript = `
 true;
 `;
 
-// Clic auto sur la tâche la plus courte (appelé depuis RN)
+// Clic auto sur la tâche la plus courte
 const avisoAutoClickScript = `
 (function() {
   function extractTime(taskElement) {
@@ -387,7 +349,6 @@ const avisoAutoClickScript = `
       withTime.sort(function(a, b) { return a.time - b.time; });
       var chosen = withTime[0];
 
-      // Marquage visuel
       document.querySelectorAll('[data-aviso-assistant="selected"]').forEach(function(el) {
         el.style.outline = '';
         el.removeAttribute('data-aviso-assistant');
@@ -416,6 +377,20 @@ const avisoAutoClickScript = `
 true;
 `;
 
+// Script injecté dans le pane bas pour surveiller l'arrivée sur YouTube
+const youtubeWatcherScript = `
+(function() {
+  if (window.__ytWatcherInstalled) return true;
+  window.__ytWatcherInstalled = true;
+  function send(message) {
+    window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify(message));
+  }
+  send({ type: 'bottomNav', url: window.location.href, stage: 'loaded' });
+  true;
+})();
+true;
+`;
+
 // ============================================================================
 // COMPOSANT PRINCIPAL
 // ============================================================================
@@ -429,10 +404,11 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [avisoTaskCount, setAvisoTaskCount] = useState(null);
   const [assistantStatus, setAssistantStatus] = useState('Prêt');
-  const [youtubeUrl, setYoutubeUrl] = useState(SITES.youtube.url);
+  const [bottomUrl, setBottomUrl] = useState(SITES.youtube.url);
+  const [bottomTitle, setBottomTitle] = useState('YOUTUBE — accueil');
   const [lastClickedTask, setLastClickedTask] = useState(null);
   const avisoWebview = useRef(null);
-  const youtubeWebview = useRef(null);
+  const bottomWebview = useRef(null);
 
   useEffect(() => {
     SecureStore.getItemAsync(COOKIE_KEY).then((value) => {
@@ -484,7 +460,8 @@ export default function App() {
     }
     setAvisoTaskCount(null);
     setAutomationPaused(true);
-    setYoutubeUrl(SITES.youtube.url);
+    setBottomUrl(SITES.youtube.url);
+    setBottomTitle('YOUTUBE — accueil');
     setLastClickedTask(null);
     setSplitMode(true);
   };
@@ -496,6 +473,7 @@ export default function App() {
     try {
       const message = JSON.parse(event.nativeEvent.data);
 
+      // ---- Messages depuis le pane AVISO ----
       if (message.type === 'avisoTaskCount') {
         setAvisoTaskCount(Number(message.count) || 0);
       }
@@ -521,43 +499,32 @@ export default function App() {
         }
       }
 
-      if (message.type === 'youtubeRedirect') {
+      // ---- Capture de la redirection depuis AVISO ----
+      if (message.type === 'redirectCaptured') {
         console.log('[AUTO] Redirect capturé:', message.source, message.url);
-        const finalUrl = resolveAvisoGoUrl(message.url, SITES.aviso.url);
-        console.log('[AUTO] URL finale résolue:', finalUrl);
+        const absolute = message.url.startsWith('http')
+          ? message.url
+          : new URL(message.url, SITES.aviso.url).toString();
 
-        if (finalUrl) {
-          const videoId = extractVideoId(finalUrl);
-          console.log('[AUTO] Video ID:', videoId);
-          setYoutubeUrl(finalUrl);
-          setAssistantStatus(`YouTube lancé${videoId ? ` · ${videoId}` : ''}`);
+        // ⚠️ On envoie l'URL BRUTE au pane bas, sans résolution
+        setBottomUrl(absolute);
+        setBottomTitle(`REDIRECTION — ${absolute.substring(0, 60)}…`);
+        setAssistantStatus(`Chargement pane bas : ${absolute.substring(0, 80)}…`);
+      }
+
+      // ---- Messages depuis le pane BAS (navigation) ----
+      if (message.type === 'bottomNav') {
+        console.log('[BOTTOM] Navigation:', message.url);
+        const u = message.url || '';
+        const vid = extractVideoId(u);
+        if (vid) {
+          setBottomTitle(`YOUTUBE — ${vid}`);
+          setAssistantStatus(`YouTube chargé · ${vid}`);
+        } else if (u.includes('aviso.bz')) {
+          setBottomTitle(`AVISO /go — ${u.substring(0, 60)}…`);
+          setAssistantStatus(`Page intermédiaire Aviso chargée`);
         } else {
-          // Fallback : suivre le redirect via fetch
-          console.log('[AUTO] Pas de go_url, tentative fetch redirect…');
-          const absolute = message.url.startsWith('http')
-            ? message.url
-            : new URL(message.url, SITES.aviso.url).toString();
-
-          fetch(absolute, {
-            method: 'GET',
-            redirect: 'follow',
-            headers: { 'Accept': 'text/html' },
-          })
-            .then((res) => {
-              const resolved = res.url;
-              console.log('[AUTO] Après redirect:', resolved);
-              const videoId = extractVideoId(resolved);
-              if (videoId || resolved.includes('youtube.com') || resolved.includes('youtu.be')) {
-                setYoutubeUrl(resolved);
-                setAssistantStatus(`YouTube lancé · ${videoId || 'URL directe'}`);
-              } else {
-                setAssistantStatus(`Redirect inattendu : ${resolved}`);
-              }
-            })
-            .catch((err) => {
-              console.log('[AUTO] Erreur fetch:', err.message);
-              setAssistantStatus(`Impossible de résoudre l'URL: ${err.message}`);
-            });
+          setBottomTitle(`PAGE — ${u.substring(0, 60)}…`);
         }
       }
     } catch (err) {
@@ -575,16 +542,11 @@ export default function App() {
     avisoWebview.current?.injectJavaScript(script);
   };
 
-  const runAssistant = () => {
-    setAutomationPaused(false);
-    setAssistantStatus('Recherche de la prochaine tâche…');
-    avisoWebview.current?.injectJavaScript(avisoTaskAssistantScript);
-  };
-
-  const resetYoutube = () => {
-    setYoutubeUrl(SITES.youtube.url);
-    setLastClickedTask(null);
+  const resetBottom = () => {
+    setBottomUrl(SITES.youtube.url);
+    setBottomTitle('YOUTUBE — accueil');
     setAssistantStatus('Prêt');
+    setLastClickedTask(null);
   };
 
   // ==========================================================================
@@ -597,12 +559,13 @@ export default function App() {
   if (splitMode) {
     return (
       <SafeAreaView style={styles.webContainer}>
+        {/* Header */}
         <View style={styles.webHeader}>
           <Pressable onPress={() => setSplitMode(false)} style={styles.backButton}>
             <Text style={styles.backText}>‹ Retour</Text>
           </Pressable>
           <View style={styles.webTitleBlock}>
-            <Text style={styles.webTitle}>Aviso + YouTube</Text>
+            <Text style={styles.webTitle}>Aviso + Bas</Text>
             <Text style={styles.taskBadge}>
               {avisoTaskCount === null ? 'Tâches : …' : `${avisoTaskCount} tâche${avisoTaskCount === 1 ? '' : 's'}`}
             </Text>
@@ -611,7 +574,11 @@ export default function App() {
             <Text style={styles.reloadText}>▶ Auto</Text>
           </Pressable>
         </View>
-        <Text style={styles.assistantStatus}>{assistantStatus}</Text>
+
+        {/* Statut */}
+        <Text style={styles.assistantStatus} numberOfLines={2}>{assistantStatus}</Text>
+
+        {/* Pane AVISO */}
         <View style={styles.avisoPane}>
           <Text style={styles.paneLabel}>AVISO — clic auto</Text>
           <WebView
@@ -626,58 +593,72 @@ export default function App() {
             injectedJavaScript={`${avisoTaskCounterScript}\n${avisoTaskAssistantScript}\n${avisoOpenHookScript}\n${avisoAutoClickScript}`}
             onMessage={handleWebMessage}
             onLoadEnd={() => {
-              // Réinjection de sécurité après chaque chargement
               avisoWebview.current?.injectJavaScript(
                 `${avisoTaskCounterScript}\n${avisoTaskAssistantScript}\n${avisoOpenHookScript}\n${avisoAutoClickScript}`
               );
             }}
             onShouldStartLoadWithRequest={(req) => {
               const u = req.url || '';
-
-              // Navigation directe vers YouTube → bloquer + rediriger pane bas
-              if (u.includes('youtube.com') || u.includes('youtu.be')) {
-                console.log('[AUTO] onShouldStartLoadWithRequest → YouTube bloqué:', u);
-                const videoId = extractVideoId(u);
-                setYoutubeUrl(u);
-                setAssistantStatus(`YouTube lancé${videoId ? ` · ${videoId}` : ''}`);
+              // Bloque toute navigation hors d'Aviso : redirige vers le pane bas
+              if (u.includes('/go/') || u.includes('youtube.com') || u.includes('youtu.be')) {
+                console.log('[AUTO] Aviso → interception nav:', u);
+                const absolute = u.startsWith('http') ? u : new URL(u, SITES.aviso.url).toString();
+                setBottomUrl(absolute);
+                setBottomTitle(`REDIRECTION — ${absolute.substring(0, 60)}…`);
+                setAssistantStatus(`Chargement pane bas : ${absolute.substring(0, 80)}…`);
                 return false;
               }
-
-              // /go/ Aviso → bloqué (déjà capturé par hook JS)
-              if (u.includes('/go/') && u.includes('aviso.bz')) {
-                console.log('[AUTO] onShouldStartLoadWithRequest → /go/ bloqué:', u);
-                const finalUrl = resolveAvisoGoUrl(u, SITES.aviso.url);
-                if (finalUrl) {
-                  const videoId = extractVideoId(finalUrl);
-                  setYoutubeUrl(finalUrl);
-                  setAssistantStatus(`YouTube lancé${videoId ? ` · ${videoId}` : ''}`);
-                }
-                return false;
-              }
-
               return true;
             }}
-            onError={() => Alert.alert('Erreur Aviso', 'Aviso n’a pas pu être chargé. Vérifiez votre connexion.')}
+            onError={() => Alert.alert('Erreur Aviso', 'Aviso n’a pas pu être chargé.')}
             startInLoadingState
             renderLoading={() => <View style={styles.center}><ActivityIndicator color="#64d2ff" /></View>}
           />
         </View>
-        <View style={styles.youtubePane}>
-          <View style={styles.youtubeHeader}>
-            <Text style={styles.paneLabel}>YOUTUBE — vidéo chargée</Text>
-            <Pressable onPress={resetYoutube} style={styles.resetButton}>
+
+        {/* Pane BAS — charge TOUTE URL brute */}
+        <View style={styles.bottomPane}>
+          <View style={styles.bottomHeader}>
+            <Text style={styles.paneLabel} numberOfLines={1}>{bottomTitle}</Text>
+            <Pressable onPress={resetBottom} style={styles.resetButton}>
               <Text style={styles.resetText}>↺ Reset</Text>
             </Pressable>
           </View>
           <WebView
-            ref={youtubeWebview}
-            source={{ uri: youtubeUrl }}
-            key={youtubeUrl}
+            ref={bottomWebview}
+            source={{ uri: bottomUrl }}
+            key={bottomUrl}
             javaScriptEnabled
             domStorageEnabled
             sharedCookiesEnabled
             thirdPartyCookiesEnabled
-            onError={() => Alert.alert('Erreur YouTube', 'YouTube n’a pas pu être chargé.')}
+            setSupportMultipleWindows={false}
+            injectedJavaScriptBeforeContentLoaded={youtubeWatcherScript}
+            injectedJavaScript={youtubeWatcherScript}
+            onMessage={handleWebMessage}
+            onLoadEnd={() => {
+              // Réinjecte pour tracker la navigation
+              bottomWebview.current?.injectJavaScript(youtubeWatcherScript);
+            }}
+            onNavigationStateChange={(navState) => {
+              if (!navState.loading && navState.url) {
+                const u = navState.url;
+                console.log('[BOTTOM] navState:', u);
+                const vid = extractVideoId(u);
+                if (vid) {
+                  setBottomTitle(`YOUTUBE — ${vid}`);
+                } else if (u.includes('aviso.bz')) {
+                  setBottomTitle(`AVISO /go — ${u.substring(0, 60)}…`);
+                } else {
+                  setBottomTitle(`PAGE — ${u.substring(0, 60)}…`);
+                }
+              }
+            }}
+            onShouldStartLoadWithRequest={(req) => {
+              // LAISSE TOUT PASSER (pages intermédiaires, redirections, YouTube...)
+              return true;
+            }}
+            onError={() => Alert.alert('Erreur pane bas', 'Chargement impossible.')}
             startInLoadingState
             renderLoading={() => <View style={styles.center}><ActivityIndicator color="#ff5c7a" /></View>}
           />
@@ -776,9 +757,9 @@ const styles = StyleSheet.create({
   reloadText: { color: '#9ba8be', fontSize: 13 },
   assistantStatus: { color: '#9ba8be', fontSize: 12, paddingHorizontal: 14, paddingVertical: 6, backgroundColor: '#11192b' },
   avisoPane: { flex: 1.1, minHeight: 0, borderBottomWidth: 2, borderBottomColor: '#263452' },
-  youtubePane: { flex: 0.9, minHeight: 0 },
-  youtubeHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: '#11192b' },
-  paneLabel: { color: '#9ba8be', backgroundColor: '#11192b', paddingHorizontal: 10, paddingVertical: 5, fontSize: 11, fontWeight: '700' },
+  bottomPane: { flex: 0.9, minHeight: 0 },
+  bottomHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: '#11192b' },
+  paneLabel: { color: '#9ba8be', backgroundColor: '#11192b', paddingHorizontal: 10, paddingVertical: 5, fontSize: 11, fontWeight: '700', flex: 1 },
   resetButton: { paddingHorizontal: 10, paddingVertical: 4 },
   resetText: { color: '#64d2ff', fontSize: 11, fontWeight: '700' },
 });
